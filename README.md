@@ -5,7 +5,7 @@ Synchronized ESP-NOW Heart Badges for the CCC Camp & Congress.
 
 ---
 
-## 🇩🇪 Schweizer Hochdeutsch
+## Deutsch
 
 ### Was ist das?
 Ein Schwarm von 8x8 LED Herz-Badges auf Basis der **Waveshare ESP32-S3-Matrix**. Die Badges kommunizieren über **ESP-NOW**, synchronisieren ihren Takt, reagieren auf die Nähe anderer Geräte (RSSI) und enthalten interaktive Easter Eggs.
