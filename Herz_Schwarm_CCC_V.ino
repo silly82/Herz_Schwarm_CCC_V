@@ -3,6 +3,12 @@
 #include <FastLED.h>
 #include <esp_wifi.h>
 
+// Serial-Ausgaben blockieren und können die Animation ruckeln lassen — Standard: aus.
+// Aktivieren: hier auf 1 setzen oder Build-Flag: -DENABLE_SERIAL_DEBUG=1
+#ifndef ENABLE_SERIAL_DEBUG
+#define ENABLE_SERIAL_DEBUG 0
+#endif
+
 // --- HARDWARE EINSTELLUNGEN ---
 #define LED_PIN     14    // Waveshare S3 Matrix intern
 #define NUM_LEDS    64
@@ -92,7 +98,9 @@ void OnDataRecv(const esp_now_recv_info_t *recv_info, const uint8_t *incomingDat
 }
 
 void setup() {
+#if ENABLE_SERIAL_DEBUG
     Serial.begin(115200);
+#endif
     pinMode(BUTTON_PIN, INPUT_PULLUP);
     
     WiFi.mode(WIFI_STA);
@@ -208,12 +216,14 @@ void loop() {
     // 7. OUTPUT
     FastLED.setBrightness(currentBright);
     FastLED.show();
-    
-    // Debug Info (nur alle 2 Sek)
+
+#if ENABLE_SERIAL_DEBUG
+    // Debug Info (nur alle 2 Sek) — bei ausgeschaltetem Flag kein Serial-Overhead in der Schleife
     if (now % 2000 < 20) {
-        Serial.printf("Peers: %d | RSSI: %.1f | Bright: %d | In: %s\n", 
+        Serial.printf("Peers: %d | RSSI: %.1f | Bright: %d | In: %s\n",
                       uniquePeerCount, smoothRSSI, currentBright, morseInput.c_str());
     }
-    
+#endif
+
     delay(20); // ~50 FPS
 }
