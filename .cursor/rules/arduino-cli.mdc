@@ -1,0 +1,36 @@
+---
+description: Arduino CLI für Build, Upload und Bibliotheken in diesem Projekt
+alwaysApply: true
+---
+
+# Arduino CLI (dieses Workspace)
+
+- **Werkzeug:** Für Kompilieren, Hochladen, Board-/Port-Infos und Bibliotheken ausschließlich die **Arduino CLI** (`arduino-cli`) verwenden — nicht die Arduino-IDE-UI als Vorgehensweise beschreiben.
+- **Sketch:** Hauptsketch ist `Herz_Schwarm_CCC_V.ino` im Projektroot; das Verzeichnis ist das Sketch-Verzeichnis.
+
+## Standard-Board (anpassen falls nötig)
+
+Hardware im Sketch: **ESP32-S3** (u. a. Waveshare S3 Matrix). Standard-FQBN für dieses Repo:
+
+```text
+esp32:esp32:esp32s3
+```
+
+Wenn ein anderes Board oder eine andere Partition nötig ist: FQBN explizit im Chat nennen oder `arduino-cli board listall` / `arduino-cli board details -b <fqbn>` nutzen.
+
+## Typische Befehle
+
+- Core/Pakete (einmalig): `arduino-cli core update-index` und `arduino-cli core install esp32:esp32`
+- Kompilieren: `arduino-cli compile --fqbn esp32:esp32:esp32s3 .`
+- Hochladen: `arduino-cli upload -p <PORT> --fqbn esp32:esp32:esp32s3 .` (Port z. B. mit `arduino-cli board list` ermitteln)
+- Bibliotheken: `arduino-cli lib install "FastLED"` (weitere nach `#include` im Sketch)
+
+## Build-Flags (optional)
+
+Serial-Debug per Define (wie im Sketch kommentiert):
+
+```bash
+arduino-cli compile --fqbn esp32:esp32:esp32s3 --build-property compiler.cpp.extra_flags="-DENABLE_SERIAL_DEBUG=1" .
+```
+
+Bei Unsicherheit: zuerst `arduino-cli version` und vorhandene Cores/Boards prüfen, dann erst lange Installationsbefehle vorschlagen.

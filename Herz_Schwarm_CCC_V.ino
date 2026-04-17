@@ -184,16 +184,17 @@ void loop() {
         txData.mode = 1;
         txData.virusID = activeVirusID;
     } 
-    else if (uniquePeerCount >= 16) {
-        // THE SINGULARITY (17 Badges)
+    else if (uniquePeerCount + 1 >= 17) {
+        // THE SINGULARITY (≥17 Geräte total: du + sichtbare Peers)
         hueOffset += 5;
         pulse = beatsin8(100, 150, 255, 0, heartBeatState);
         for (int i = 0; i < NUM_LEDS; i++) leds[i] = CHSV(hueOffset + (i*3), 255, pulse);
         txData.mode = 0;
     } 
     else {
-        // NORMAL / PRIME
-        bool prime = isPrime(uniquePeerCount);
+        // NORMAL / PRIME (Gesamtzahl = gefundene Peers + dieses Gerät)
+        uint8_t totalDevices = uniquePeerCount + 1;
+        bool prime = isPrime(totalDevices);
         pulse = prime ? beatsin8(80, 120, 255, 0, heartBeatState) : beatsin8(35 + (power*55), 100, 255, 0, heartBeatState);
         
         fill_solid(leds, NUM_LEDS, heartColor);
