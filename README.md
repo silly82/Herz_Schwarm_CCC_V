@@ -106,7 +106,7 @@ Beenden mit `Ctrl+C`. Vor einem erneuten Upload den Monitor beenden (Port freige
 ### Firmware-Version
 Im Sketch `Herz_Schwarm_CCC_V.ino` oben bei den `FW_*`-Defines.
 
-**Git-Stand:** Es gibt noch keine Git-Tags. Die Basis **`1.0.0`** (`FW_VERSION_MAJOR/MINOR/PATCH`) bezeichnet den dokumentierten **Release-Stand** (ESP-NOW-Schwarm, Primzahl/Singularität, Morse-Virus, FastLED/Waveshare) entsprechend der bisherigen Historie (**Merge** Debug→main, Primzahl-Logik, README/CLI).
+**Git-Stand:** Annotierter Tag **`v1.0.0`** auf `main` markiert diesen Stand. Die Basis **`1.0.0`** (`FW_VERSION_MAJOR/MINOR/PATCH`) bezeichnet den **Release-Stand** (ESP-NOW-Schwarm, Primzahl/Singularität, Morse-Virus, FastLED/Waveshare).
 
 | Build | Anzeige (Beispiel) | Bedeutung |
 |--------|-------------------|-----------|

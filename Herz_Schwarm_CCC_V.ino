@@ -11,9 +11,8 @@
 
 /*
  * --- Firmware-Version (siehe README: „Firmware-Version“) ---
- * Git-Hintergrund: Im Repo gibt es noch keine Tags. 1.0.0 bezeichnet die zur Dokumentation
- * festgelegte Release-Linie (Funktionsstand: ESP-NOW Herzschwarm, Primzahl/Singularität,
- * Morse-Virus, optional Serial-Debug) entsprechend dem merged Stand main ↔ Debug.
+ * Git: Release mit Tag v1.0.0 auf main. 1.0.0 = Release-Linie (ESP-NOW Herzschwarm,
+ * Primzahl/Singularität, Morse-Virus, optional Serial-Debug).
  *
  * Release-Build (ENABLE_SERIAL_DEBUG=0): Anzeige MAJOR.MINOR.PATCH
  * Debug-Build (ENABLE_SERIAL_DEBUG=1):    Anzeige MAJOR.MINOR.DD — DD zweistellig 01…99
