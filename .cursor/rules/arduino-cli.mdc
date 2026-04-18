@@ -25,12 +25,19 @@ Wenn ein anderes Board oder eine andere Partition nötig ist: FQBN explizit im C
 - Hochladen: `arduino-cli upload -p <PORT> --fqbn esp32:esp32:esp32s3 .` (Port z. B. mit `arduino-cli board list` ermitteln)
 - Bibliotheken: `arduino-cli lib install "FastLED"` (weitere nach `#include` im Sketch)
 
-## Build-Flags (optional)
+## Build-Flags & Serial über USB (optional)
 
-Serial-Debug per Define (wie im Sketch kommentiert):
+Serial-Debug per Define (wie im Sketch kommentiert). **Hinweis:** `arduino-cli upload` akzeptiert **kein** `--build-property` — bei Debug-Build zuerst mit festem `--build-path` kompilieren, dann `upload --input-dir <dieser Ordner>`. Für `Serial` am USB-Kabel (ESP32-S3) zusätzlich **`--board-options CDCOnBoot=cdc`**.
 
 ```bash
-arduino-cli compile --fqbn esp32:esp32:esp32s3 --build-property compiler.cpp.extra_flags="-DENABLE_SERIAL_DEBUG=1" .
+arduino-cli compile --fqbn esp32:esp32:esp32s3 --board-options CDCOnBoot=cdc \
+  --build-property "compiler.cpp.extra_flags=-DENABLE_SERIAL_DEBUG=1" \
+  --build-path build_debug .
+arduino-cli upload -p <PORT> --fqbn esp32:esp32:esp32s3 --board-options CDCOnBoot=cdc \
+  --input-dir build_debug .
+arduino-cli monitor -p <PORT> -c baudrate=115200
 ```
+
+Ausführliche Erklärung (Morse-Log, Monitor, Port, **Firmware-Version `FW_*`** im Sketch): **`README.md`**.
 
 Bei Unsicherheit: zuerst `arduino-cli version` und vorhandene Cores/Boards prüfen, dann erst lange Installationsbefehle vorschlagen.

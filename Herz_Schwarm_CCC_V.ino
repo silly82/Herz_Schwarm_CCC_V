@@ -9,6 +9,24 @@
 #define ENABLE_SERIAL_DEBUG 0
 #endif
 
+/*
+ * --- Firmware-Version (siehe README: „Firmware-Version“) ---
+ * Git-Hintergrund: Im Repo gibt es noch keine Tags. 1.0.0 bezeichnet die zur Dokumentation
+ * festgelegte Release-Linie (Funktionsstand: ESP-NOW Herzschwarm, Primzahl/Singularität,
+ * Morse-Virus, optional Serial-Debug) entsprechend dem merged Stand main ↔ Debug.
+ *
+ * Release-Build (ENABLE_SERIAL_DEBUG=0): Anzeige MAJOR.MINOR.PATCH
+ * Debug-Build (ENABLE_SERIAL_DEBUG=1):    Anzeige MAJOR.MINOR.DD — DD zweistellig 01…99
+ */
+#define FW_VERSION_MAJOR 1
+#define FW_VERSION_MINOR   0
+#define FW_VERSION_PATCH   0
+#define FW_DEBUG_BUILD     1  // Nur Debug-Zweig: bei sichtbarem neuen Debug-Stand +1, max 99
+
+#if FW_DEBUG_BUILD < 1 || FW_DEBUG_BUILD > 99
+#error "FW_DEBUG_BUILD muss zwischen 1 und 99 liegen (zweistelliger Debug-Zähler)."
+#endif
+
 // --- HARDWARE EINSTELLUNGEN ---
 #define LED_PIN     14    // Waveshare S3 Matrix intern
 #define NUM_LEDS    64
@@ -59,6 +77,13 @@ uint32_t lastBtnRelease = 0;
 
 CRGB heartColor = CRGB(255, 0, 150); // Cyber-Pink
 
+#if ENABLE_SERIAL_DEBUG
+static void printFwVersionBanner() {
+    Serial.printf("Herz-Schwarm FW %u.%u.%02u+debug (RSSI/Morse/Peers siehe Log)\n",
+                  FW_VERSION_MAJOR, FW_VERSION_MINOR, FW_DEBUG_BUILD);
+}
+#endif
+
 // --- HELPER: PRIMZAHL ---
 bool isPrime(int n) {
     if (n <= 1) return false;
@@ -100,6 +125,7 @@ void OnDataRecv(const esp_now_recv_info_t *recv_info, const uint8_t *incomingDat
 void setup() {
 #if ENABLE_SERIAL_DEBUG
     Serial.begin(115200);
+    printFwVersionBanner();
 #endif
     pinMode(BUTTON_PIN, INPUT_PULLUP);
     
@@ -133,6 +159,10 @@ void loop() {
     if (!btn && btnDownTime != 0) {
         uint32_t duration = now - btnDownTime;
         morseInput += (duration > 250) ? "-" : ".";
+#if ENABLE_SERIAL_DEBUG
+        Serial.printf("[Morse] +%s (%lu ms) Puffer: \"%s\"\n",
+                      (duration > 250) ? "-" : ".", (unsigned long)duration, morseInput.c_str());
+#endif
         btnDownTime = 0;
         lastBtnRelease = now;
     }
@@ -140,7 +170,15 @@ void loop() {
         if (morseInput == "-.-.") { 
             activeVirusID = random(1, 100000); 
             virusStartTime = now;
+#if ENABLE_SERIAL_DEBUG
+            Serial.println("[Morse] Wortende -> VIRUS (-.-.)");
+#endif
         }
+#if ENABLE_SERIAL_DEBUG
+        else {
+            Serial.printf("[Morse] Wortende -> ignoriert (\"%s\")\n", morseInput.c_str());
+        }
+#endif
         morseInput = ""; 
     }
 
@@ -219,9 +257,12 @@ void loop() {
     FastLED.show();
 
 #if ENABLE_SERIAL_DEBUG
-    // Debug Info (nur alle 2 Sek) — bei ausgeschaltetem Flag kein Serial-Overhead in der Schleife
-    if (now % 2000 < 20) {
-        Serial.printf("Peers: %d | RSSI: %.1f | Bright: %d | In: %s\n",
+    // Nur wenn ENABLE_SERIAL_DEBUG=1: kompletter Block fehlt sonst im Binary — keine Extra-Arbeit für die Animation.
+    static uint32_t lastStatusLog = 0;
+    if (now - lastStatusLog >= 2000) {
+        lastStatusLog = now;
+        Serial.printf("Status | FW %u.%u.%02u+debug | Peers: %d | RSSI: %.1f | Bright: %d | Morse: \"%s\"\n",
+                      FW_VERSION_MAJOR, FW_VERSION_MINOR, FW_DEBUG_BUILD,
                       uniquePeerCount, smoothRSSI, currentBright, morseInput.c_str());
     }
 #endif
