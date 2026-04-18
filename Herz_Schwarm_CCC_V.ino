@@ -20,7 +20,7 @@
 #define FW_VERSION_MAJOR 1
 #define FW_VERSION_MINOR   0
 #define FW_VERSION_PATCH   0
-#define FW_DEBUG_BUILD     1  // Nur Debug-Zweig: bei sichtbarem neuen Debug-Stand +1, max 99
+#define FW_DEBUG_BUILD     2  // Nur Debug-Zweig: bei sichtbarem neuen Debug-Stand +1, max 99
 
 #if FW_DEBUG_BUILD < 1 || FW_DEBUG_BUILD > 99
 #error "FW_DEBUG_BUILD muss zwischen 1 und 99 liegen (zweistelliger Debug-Zähler)."
@@ -37,14 +37,29 @@
 #define CCC_CHANNEL 13          
 #define MAGIC_ID    0x421337CC  
 #define PEER_TIMEOUT 4000       // Nach 4 Sek. wird ein verschwundenes Badge gelöscht
-#define MAX_PEERS   25          
+#define MAX_PEERS   25
+
+// Remote-Effekte (Basisstation / kompatibles Paket): mode im SyncPacket
+#define SYNC_MODE_VIRUS    1  // weißer Blitz (wie Morse -.-.) — 3 s
+#define SYNC_MODE_RAINBOW  2  // Singularity-Regenbogen — 15 s
+#define SYNC_MODE_PRIME    3  // Primzahl-Puls + Sparkles — 12 s
+#define REMOTE_RAINBOW_MS  15000
+#define REMOTE_PRIME_MS    12000
 
 // --- DATENSTRUKTUR ---
-struct SyncPacket {
-    uint32_t magic_id;    
-    uint32_t beatCounter; 
-    uint32_t virusID;    
-    uint8_t  mode;       
+// Alte Firmware: 13 Byte (magic…mode). Neu: +4 Byte Firmware-Stände, packed ohne Padding.
+// ver_rel = PATCH bei Release (ver_dbg==0); ver_dbg 1…99 = Debug-Build (+debug),0 = Release-Binary.
+#define SYNC_PACKET_LEGACY_LEN 13
+
+struct __attribute__((packed)) SyncPacket {
+    uint32_t magic_id;
+    uint32_t beatCounter;
+    uint32_t virusID;
+    uint8_t  mode;
+    uint8_t  ver_major;
+    uint8_t  ver_minor;
+    uint8_t  ver_rel;
+    uint8_t  ver_dbg;
 };
 
 // --- MASKE (Oben definiert für den Compiler) ---
@@ -57,7 +72,15 @@ SyncPacket txData;
 CRGB leds[NUM_LEDS];
 
 // --- PEER TRACKING ---
-struct PeerTracker { uint8_t mac[6]; uint32_t lastSeen; };
+struct PeerTracker {
+    uint8_t mac[6];
+    uint32_t lastSeen;
+    uint8_t ver_major;
+    uint8_t ver_minor;
+    uint8_t ver_rel;
+    uint8_t ver_dbg;
+    uint8_t ver_known;  // 1 = mindestens ein Paket mit Versionsfeldern empfangen
+};
 PeerTracker seenPeers[MAX_PEERS];
 uint8_t uniquePeerCount = 0;
 
@@ -68,6 +91,10 @@ uint8_t hueOffset = 0;
 uint8_t broadcastMac[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 uint32_t activeVirusID = 0;
 uint32_t virusStartTime = 0;
+uint32_t activeRainbowID = 0;
+uint32_t rainbowStartTime = 0;
+uint32_t activePrimeID = 0;
+uint32_t primePartyStartTime = 0;
 
 // Morse Variablen
 uint32_t btnDownTime = 0;
@@ -93,31 +120,64 @@ bool isPrime(int n) {
 }
 
 // --- PEER TRACKING LOGIK ---
-void trackBadge(const uint8_t* mac) {
+static void trackBadge(const uint8_t* mac, bool hasVer, uint8_t vmaj, uint8_t vmin, uint8_t vrel,
+                       uint8_t vdbg) {
     uint32_t now = millis();
     for (int i = 0; i < MAX_PEERS; i++) {
-        if (memcmp(seenPeers[i].mac, mac, 6) == 0) { seenPeers[i].lastSeen = now; return; }
+        if (memcmp(seenPeers[i].mac, mac, 6) == 0) {
+            seenPeers[i].lastSeen = now;
+            if (hasVer) {
+                seenPeers[i].ver_major = vmaj;
+                seenPeers[i].ver_minor = vmin;
+                seenPeers[i].ver_rel = vrel;
+                seenPeers[i].ver_dbg = vdbg;
+                seenPeers[i].ver_known = 1;
+            }
+            return;
+        }
     }
     for (int i = 0; i < MAX_PEERS; i++) {
-        if (seenPeers[i].lastSeen == 0) { memcpy(seenPeers[i].mac, mac, 6); seenPeers[i].lastSeen = now; return; }
+        if (seenPeers[i].lastSeen == 0) {
+            memcpy(seenPeers[i].mac, mac, 6);
+            seenPeers[i].lastSeen = now;
+            if (hasVer) {
+                seenPeers[i].ver_major = vmaj;
+                seenPeers[i].ver_minor = vmin;
+                seenPeers[i].ver_rel = vrel;
+                seenPeers[i].ver_dbg = vdbg;
+                seenPeers[i].ver_known = 1;
+            }
+            return;
+        }
     }
 }
 
 void OnDataRecv(const esp_now_recv_info_t *recv_info, const uint8_t *incomingData, int len) {
-    if (len == sizeof(SyncPacket)) {
-        SyncPacket* rx = (SyncPacket*)incomingData;
-        if (rx->magic_id == MAGIC_ID) {
-            trackBadge(recv_info->src_addr);
-            // Empfangenes Signal gewichten
-            float currentRSSI = (float)recv_info->rx_ctrl->rssi;
-            smoothRSSI = (0.05 * currentRSSI) + (0.95 * smoothRSSI);
-            heartBeatState = rx->beatCounter;
-            
-            if (rx->mode == 1 && rx->virusID != activeVirusID) {
-                activeVirusID = rx->virusID;
-                virusStartTime = millis();
-            }
-        }
+    if (len < (int)SYNC_PACKET_LEGACY_LEN) return;
+    if (*(const uint32_t *)incomingData != MAGIC_ID) return;
+
+    SyncPacket rx;
+    memset(&rx, 0, sizeof(rx));
+    memcpy(&rx, incomingData, (size_t)len < sizeof(rx) ? (size_t)len : sizeof(rx));
+    const bool hasVer = (len >= (int)sizeof(SyncPacket));
+
+    trackBadge(recv_info->src_addr, hasVer, rx.ver_major, rx.ver_minor, rx.ver_rel, rx.ver_dbg);
+
+    float currentRSSI = (float)recv_info->rx_ctrl->rssi;
+    smoothRSSI = (0.05 * currentRSSI) + (0.95 * smoothRSSI);
+    heartBeatState = rx.beatCounter;
+
+    if (rx.mode == SYNC_MODE_VIRUS && rx.virusID != activeVirusID) {
+        activeVirusID = rx.virusID;
+        virusStartTime = millis();
+    }
+    if (rx.mode == SYNC_MODE_RAINBOW && rx.virusID != activeRainbowID) {
+        activeRainbowID = rx.virusID;
+        rainbowStartTime = millis();
+    }
+    if (rx.mode == SYNC_MODE_PRIME && rx.virusID != activePrimeID) {
+        activePrimeID = rx.virusID;
+        primePartyStartTime = millis();
     }
 }
 
@@ -215,29 +275,46 @@ void loop() {
     uint8_t pulse;
 
     if (now - virusStartTime < 3000) {
-        // MORSE VIRUS BLITZ
+        // MORSE / REMOTE VIRUS BLITZ
         uint32_t flash = (now - virusStartTime) % 300;
         if (flash < 150) fill_solid(leds, NUM_LEDS, CRGB::White);
-        txData.mode = 1;
+        txData.mode = SYNC_MODE_VIRUS;
         txData.virusID = activeVirusID;
-    } 
+    }
+    else if (now - rainbowStartTime < REMOTE_RAINBOW_MS) {
+        // REMOTE REGENBOGEN (gleiche Optik wie Singularity)
+        hueOffset += 5;
+        pulse = beatsin8(100, 150, 255, 0, heartBeatState);
+        for (int i = 0; i < NUM_LEDS; i++) leds[i] = CHSV(hueOffset + (i*3), 255, pulse);
+        txData.mode = SYNC_MODE_RAINBOW;
+        txData.virusID = activeRainbowID;
+    }
+    else if (now - primePartyStartTime < REMOTE_PRIME_MS) {
+        // REMOTE PRIMZAHL-PARTY (Optik wie lokale Primzahl-Phase)
+        pulse = beatsin8(80, 120, 255, 0, heartBeatState);
+        fill_solid(leds, NUM_LEDS, heartColor);
+        nscale8(leds, NUM_LEDS, pulse);
+        if (random8() > 210) leds[random8(64)] = CRGB::White;
+        txData.mode = SYNC_MODE_PRIME;
+        txData.virusID = activePrimeID;
+    }
     else if (uniquePeerCount + 1 >= 17) {
         // THE SINGULARITY (≥17 Geräte total: du + sichtbare Peers)
         hueOffset += 5;
         pulse = beatsin8(100, 150, 255, 0, heartBeatState);
         for (int i = 0; i < NUM_LEDS; i++) leds[i] = CHSV(hueOffset + (i*3), 255, pulse);
         txData.mode = 0;
-    } 
+    }
     else {
         // NORMAL / PRIME (Gesamtzahl = gefundene Peers + dieses Gerät)
         uint8_t totalDevices = uniquePeerCount + 1;
         bool prime = isPrime(totalDevices);
         pulse = prime ? beatsin8(80, 120, 255, 0, heartBeatState) : beatsin8(35 + (power*55), 100, 255, 0, heartBeatState);
-        
+
         fill_solid(leds, NUM_LEDS, heartColor);
         nscale8(leds, NUM_LEDS, pulse);
-        
-        if(prime && random8() > 210) leds[random8(64)] = CRGB::White;
+
+        if (prime && random8() > 210) leds[random8(64)] = CRGB::White;
         txData.mode = 0;
     }
 
@@ -249,6 +326,15 @@ void loop() {
     // 6. SENDEN
     txData.magic_id = MAGIC_ID;
     txData.beatCounter = heartBeatState;
+    txData.ver_major = FW_VERSION_MAJOR;
+    txData.ver_minor = FW_VERSION_MINOR;
+#if ENABLE_SERIAL_DEBUG
+    txData.ver_rel = FW_VERSION_PATCH;
+    txData.ver_dbg = FW_DEBUG_BUILD;
+#else
+    txData.ver_rel = FW_VERSION_PATCH;
+    txData.ver_dbg = 0;
+#endif
     esp_now_send(broadcastMac, (uint8_t *) &txData, sizeof(txData));
 
     // 7. OUTPUT
@@ -260,9 +346,28 @@ void loop() {
     static uint32_t lastStatusLog = 0;
     if (now - lastStatusLog >= 2000) {
         lastStatusLog = now;
-        Serial.printf("Status | FW %u.%u.%02u+debug | Peers: %d | RSSI: %.1f | Bright: %d | Morse: \"%s\"\n",
-                      FW_VERSION_MAJOR, FW_VERSION_MINOR, FW_DEBUG_BUILD,
-                      uniquePeerCount, smoothRSSI, currentBright, morseInput.c_str());
+        char line[200];
+        int n = snprintf(line, sizeof(line),
+                         "Status | FW %u.%u.%02u+debug | Peers: %d | RSSI: %.1f | Bright: %d | Morse: \"%s\" | remote",
+                         FW_VERSION_MAJOR, FW_VERSION_MINOR, FW_DEBUG_BUILD,
+                         uniquePeerCount, smoothRSSI, currentBright, morseInput.c_str());
+        int listed = 0;
+        for (int i = 0; i < MAX_PEERS && n < (int)sizeof(line) - 12 && listed < 10; i++) {
+            if (seenPeers[i].lastSeen == 0) continue;
+            if (seenPeers[i].ver_known) {
+                if (seenPeers[i].ver_dbg) {
+                    n += snprintf(line + n, sizeof(line) - (size_t)n, " %u.%u.%02u+",
+                                  seenPeers[i].ver_major, seenPeers[i].ver_minor, seenPeers[i].ver_dbg);
+                } else {
+                    n += snprintf(line + n, sizeof(line) - (size_t)n, " %u.%u.%u",
+                                  seenPeers[i].ver_major, seenPeers[i].ver_minor, seenPeers[i].ver_rel);
+                }
+            } else {
+                n += snprintf(line + n, sizeof(line) - (size_t)n, " ?");
+            }
+            listed++;
+        }
+        Serial.println(line);
     }
 #endif
 

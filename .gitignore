@@ -1,2 +1,3 @@
 # Lokaler Arduino-CLI-Build (siehe README: Serial-Debug mit --build-path build_debug)
 build_debug/
+build_basestation/
