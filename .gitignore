@@ -2,3 +2,13 @@
 build_debug/
 build_batch/
 build_basestation/
+
+# Nerves / Elixir (herz_schwarm_nerves/)
+herz_schwarm_nerves/_build/
+herz_schwarm_nerves/deps/
+herz_schwarm_nerves/priv/static/assets/
+herz_schwarm_nerves/priv/static/cache_manifest.json
+herz_schwarm_nerves/tmp/
+herz_schwarm_nerves/erl_crash.dump
+herz_schwarm_nerves/*.ez
+herz_schwarm_nerves/artifacts/

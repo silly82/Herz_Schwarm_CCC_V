@@ -17,7 +17,8 @@ Ein Schwarm von 8x8 LED Herz-Badges auf Basis der **Waveshare ESP32-S3-Matrix**.
 - **Die Singularität (≥17 Geräte):** Sobald **mindestens 17 Geräte insgesamt** da sind (du + 16 sichtbare Peers), schaltet die Animation auf den **Regenbogen-Modus** um (nicht nur bei exakt 17).
 - **Der Morse-Virus:** Morsese ein **«C»** (`- . - .`) über die BOOT-Taste, um einen weissen Blitz-Virus durch den gesamten Schwarm zu jagen.
 - **Die Welle (Basisstation):** Eine Welle breitet sich von der Basisstation aus: Badges in der Nähe leuchten zuerst, weiter entfernte später (RSSI-basierte Verzögerung, ~4 s Gesamtdauer). Badges leiten die Welle per ESP-NOW weiter.
-- **Fernauslösung (Basisstation):** Kompatibles `SyncPacket` mit `mode` **1** (Virus), **2** (Regenbogen / Singularity-Optik ~15 s), **3** (Primzahl-Party ~12 s), **4** (Welle / RSSI-Ripple ~4 s). Neue `virusID` pro Effekt verhindert Doppel-Trigger; während eines Effekts wird der passende `mode` weitergesendet (Kettenreaktion im Schwarm).
+- **Fernauslösung (Basisstation):** Kompatibles `SyncPacket` mit `mode` **1** (Virus), **2** (Regenbogen / Singularity-Optik ~15 s), **3** (Primzahl-Party ~12 s), **4** (Welle / RSSI-Ripple ~4 s), **5** (Beat-Puls ~150 ms), **6** (RSSI-Zonen-Farben ~5 s), **7** (Ambient-Farbe ~30 s), **8** (Strobe ~2 s). Neue `virusID` pro Effekt verhindert Doppel-Trigger; während eines Effekts wird der passende `mode` weitergesendet (Kettenreaktion im Schwarm).
+- **Nerves-Controller (Raspberry Pi):** Optionale Elixir/Nerves-App (`herz_schwarm_nerves/`) steuert den Schwarm über einen USB-ESP32-Bridge (ESP-NOW). LiveView Web-UI für Effekt-Steuerung, Beat-Tap-Tempo, Ambient-Farbwahl. Koexistiert mit der Basisstation auf Kanal 13.
 
 ### Spezifische Hardware-Hinweise (Waveshare ESP32-S3-Matrix)
 - **Pinout:** Die interne Matrix ist fest an **GPIO 14** verdrahtet. Die BOOT-Taste liegt auf **GPIO 0**.
@@ -38,7 +39,8 @@ A swarm of 8x8 LED heart badges based on the **Waveshare ESP32-S3-Matrix**. They
 - **The Singularity (≥17 devices):** When **at least 17 devices** are present in total (you + 16 visible peers), the animation switches to **rainbow mode** (not only at exactly 17).
 - **The Morse Virus:** Morse a **"C"** (`- . - .`) using the BOOT button to trigger a white flash "virus" across the entire swarm.
 - **The Wave (base station):** A wave ripples outward from the base station: nearby badges light up first, distant ones later (RSSI-based delay, ~4 s total). Badges re-broadcast the wave via ESP-NOW for swarm propagation.
-- **Remote trigger (base station):** Compatible `SyncPacket` with `mode` **1** (virus), **2** (rainbow / singularity look ~15 s), **3** (prime-party look ~12 s), **4** (wave / RSSI ripple ~4 s). A fresh `virusID` per effect avoids re-triggering; while active, badges forward the same `mode` for swarm propagation.
+- **Remote trigger (base station):** Compatible `SyncPacket` with `mode` **1** (virus), **2** (rainbow / singularity look ~15 s), **3** (prime-party look ~12 s), **4** (wave / RSSI ripple ~4 s), **5** (beat pulse ~150 ms), **6** (RSSI zone colors ~5 s), **7** (ambient color ~30 s), **8** (strobe ~2 s). A fresh `virusID` per effect avoids re-triggering; while active, badges forward the same `mode` for swarm propagation.
+- **Nerves Controller (Raspberry Pi):** Optional Elixir/Nerves app (`herz_schwarm_nerves/`) controls the swarm via a USB ESP32 bridge (ESP-NOW). LiveView web-UI for effect control, beat tap-tempo, ambient color picker. Coexists with the base station on channel 13.
 
 ### Specific Hardware Notes (Waveshare ESP32-S3-Matrix)
 - **Pinout:** Internal matrix is wired to **GPIO 14**. BOOT button is on **GPIO 0**.
@@ -157,7 +159,7 @@ Im Sketch `Herz_Schwarm_CCC_V.ino` oben bei den `FW_*`-Defines.
 ### ESP-NOW Paket (Sync)
 Kompaktes `SyncPacket` (packed): `magic_id`, `beatCounter`, `virusID`, `mode` wie bisher, plus **vier Byte** `ver_major`, `ver_minor`, `ver_rel`, `ver_dbg` (gesamt **17 Byte**). **Ältere Firmware** sendet nur **13 Byte** — wird weiter erkannt; die Version des Peers bleibt dann unbekannt (`?` im Debug-Log), bis ein Paket mit voller Länge ankommt. Zusätzliche Kosten: etwas größeres Payload pro Sendezyklus (weiterhin ein `esp_now_send` pro Frame), wenig RAM pro Peer für die gespeicherte Version.
 
-**`mode`-Werte (Badge & Basisstation):** `0` normal; `1` Virus-Animation; `2` Fern-Regenbogen; `3` Fern-Primzahl-Party; `4` Welle (RSSI-basierter Ripple von der Basisstation, ~4 s). (Nur `1`…`4` lösen Effekte aus; `0` ist Standard nach den Effekt-Fenstern bzw. bei reiner Nähe-Logik.)
+**`mode`-Werte (Badge & Basisstation):** `0` normal; `1` Virus-Animation; `2` Fern-Regenbogen; `3` Fern-Primzahl-Party; `4` Welle (RSSI-basierter Ripple, ~4 s); `5` Beat-Puls (weiss, ~150 ms); `6` RSSI-Zonen-Farben (rot/gelb/blau, ~5 s); `7` Ambient-Farbe (RGB aus `beatCounter`, ~30 s); `8` Strobe (weisse Blitze, ~2 s). (Nur `1`…`8` lösen Effekte aus; `0` ist Standard nach den Effekt-Fenstern bzw. bei reiner Nähe-Logik.)
 
 ---
 
@@ -167,15 +169,16 @@ Kompaktes `SyncPacket` (packed): `magic_id`, `beatCounter`, `virusID`, `mode` wi
 2. **Basisstation-Sketch:** Ordner `Herz_Schwarm_BaseStation/`, Datei `Herz_Schwarm_BaseStation.ino`, **FQBN** `esp32:esp32:esp32s3`; Ethernet **W5500** (Referenz-Pins Spotpear: SCK 13, MISO 12, MOSI 11, CS 14, RST 9, INT 10).
 3. **Firmware-Version Basisstation:** `STATION_FW_MAJOR/MINOR/PATCH` im Basisstation-Sketch; in der Web-UI und in JSON (`/api/peers` → `station`) sichtbar.
 4. **Web-UI Basisstation:** HTTP Port **80** nach Ethernet-IP (`/`): Peers-Tabelle (Polling), Eastereggs (Virus / Regenbogen / Primzahl-Party / Welle), **MQTT-Konfiguration** (Formular).
-5. **REST-API Basisstation:** `GET /api/peers` (JSON: Station-Version, Peer-Liste mit MAC, RSSI, Firmware-String, Alter); `POST /api/effect?m=1|2|3|4`; `POST /api/virus` (Alias für `m=1`); `GET /api/mqtt` (Konfiguration **ohne** Passwort, mit `has_password` und `connected`); `POST /api/mqtt` (Form-URL-encoded: `en`, `host`, `port`, `user`, optional `pass`, `ts`, `tc` — leeres Passwort = unverändert).
+5. **REST-API Basisstation:** `GET /api/peers` (JSON: Station-Version, Peer-Liste mit MAC, RSSI, Firmware-String, Alter); `POST /api/effect?m=1|2|3|4`; `POST /api/virus` (Alias für `m=1`); `GET /api/mqtt` (Konfiguration **ohne** Passwort, mit `has_password` und `connected`); `POST /api/mqtt` (Form-URL-encoded: `en`, `host`, `port`, `user`, optional `pass`, `ts`, `tc` — leeres Passwort = unverändert). Modi 5–8 werden nur vom Nerves-Controller gesendet (direkt via ESP-NOW-Bridge).
 6. **MQTT:** **Klartext-TCP** (typisch Port **1883**), **kein TLS**. Einstellungen in **NVS** (`Preferences`, Namespace `hs_mqtt`); Broker per **Hostname oder IP** (`Network.hostByName`). Topics konfigurierbar: Status (Publish, JSON wie Peers-Kurzform), Befehl (Subscribe → löst Virus/Effekt `m=1` aus).
 7. **Kompilieren Basisstation:** `arduino-cli compile --fqbn esp32:esp32:esp32s3 Herz_Schwarm_BaseStation` (Pfad zum Ordner anpassen).
 8. **Flashen Badge:** `arduino-cli upload -p <PORT> --fqbn esp32:esp32:esp32s3 .` im Repo-Wurzelverzeichnis; Port mit `arduino-cli board list`.
 9. **Flashen Basisstation:** `arduino-cli upload -p <PORT> --fqbn esp32:esp32:esp32s3 Herz_Schwarm_BaseStation`.
 9a. **Batch-Update Badges:** `scripts/batch_flash_herz_schwarm.sh` (siehe Abschnitt *Batch-Update*), Log: `firmware_update_log.csv` / `firmware_update_log.md`, Build-Cache `build_batch/`.
 10. **Build-Artefakte:** Ordner `build_debug/`, `build_batch/` und `build_basestation/` sind in `.gitignore` und gehören nicht ins Repository.
-11. **Abwärtskompatibilität:** Badges mit alter Firmware reagieren nur auf **`mode == 1`** (Virus); `2`/`3`/`4` werden ignoriert. Basisstation kann trotzdem alle Modi senden.
-12. **Cursor / Arduino CLI:** Zusätzliche Befehle in `.cursor/rules/arduino-cli.mdc`.
+11. **Abwärtskompatibilität:** Badges mit alter Firmware reagieren nur auf **`mode == 1`** (Virus); `2`–`8` werden ignoriert. Basisstation und Nerves-Controller können trotzdem alle Modi senden.
+12. **Nerves-Controller:** Ordner `herz_schwarm_nerves/`, Elixir/Nerves-App für **Raspberry Pi 4**. Steuert Badges über USB-ESP32-Bridge (ESP-NOW Kanal 13). Web-UI auf Port 4000. Bridge-Firmware: `herz_schwarm_nerves/firmware/esp32_bridge/esp32_bridge.ino` (Arduino, benötigt ArduinoJson-Library). Effektmodi 1–8, Beat-Tap-Tempo, Ambient-RGB-Steuerung. Koexistiert mit Basisstation (unterschiedliche `virusID`s).
+13. **Cursor / Arduino CLI:** Zusätzliche Befehle in `.cursor/rules/arduino-cli.mdc`.
 
 ### Code Adjustments
 Ensure the FastLED initialization matches the Waveshare hardware (im Sketch ist die Farbreihenfolge wie dort verdrahtet gesetzt, siehe `Herz_Schwarm_CCC_V.ino`):

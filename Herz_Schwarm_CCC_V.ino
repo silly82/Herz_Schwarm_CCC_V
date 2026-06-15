@@ -44,10 +44,24 @@
 #define SYNC_MODE_RAINBOW  2  // Singularity-Regenbogen — 15 s
 #define SYNC_MODE_PRIME    3  // Primzahl-Puls + Sparkles — 12 s
 #define SYNC_MODE_WAVE     4  // Welle: ripple von Basisstation nach RSSI-Distanz
+#define SYNC_MODE_BEAT     5  // Beat-Sync Puls (manuell oder BPM)
+#define SYNC_MODE_ZONE     6  // RSSI-Zonen-Farben
+#define SYNC_MODE_AMBIENT  7  // Feste Farbe (alle LEDs)
+#define SYNC_MODE_STROBE   8  // Strobe-Blitz
 #define REMOTE_RAINBOW_MS  15000
 #define REMOTE_PRIME_MS    12000
 #define WAVE_DURATION_MS   4000
 #define WAVE_PULSE_MS      700
+#define BEAT_PULSE_MS      150
+#define REMOTE_ZONE_MS     5000
+#define REMOTE_AMBIENT_MS  30000
+#define STROBE_DURATION_MS 2000
+#define STROBE_FLASH_MS    80
+
+// Zone colors (compile-time, per badge firmware)
+#define ZONE0_COLOR  CRGB(255, 50, 50)   // Nah (RSSI > -55): rot
+#define ZONE1_COLOR  CRGB(255, 200, 0)   // Mitte (RSSI > -75): gelb
+#define ZONE2_COLOR  CRGB(50, 100, 255)  // Fern  (RSSI <= -75): blau
 
 // --- DATENSTRUKTUR ---
 // Alte Firmware: 13 Byte (magic…mode). Neu: +4 Byte Firmware-Stände, packed ohne Padding.
@@ -103,6 +117,19 @@ uint32_t waveStartTime = 0;
 uint32_t waveDelay = 0;
 bool waveActive = false;
 bool waveReBroadcastDone = false;
+uint32_t activeBeatID = 0;
+uint32_t beatStartTime = 0;
+bool beatActive = false;
+uint32_t activeZoneID = 0;
+uint32_t zoneStartTime = 0;
+bool zoneActive = false;
+uint32_t activeAmbientID = 0;
+uint32_t ambientStartTime = 0;
+bool ambientActive = false;
+uint8_t ambientR = 0, ambientG = 0, ambientB = 0;
+uint32_t activeStrobeID = 0;
+uint32_t strobeStartTime = 0;
+bool strobeActive = false;
 
 // Morse Variablen
 uint32_t btnDownTime = 0;
@@ -195,6 +222,29 @@ void OnDataRecv(const esp_now_recv_info_t *recv_info, const uint8_t *incomingDat
         waveStartTime = millis();
         waveActive = true;
         waveReBroadcastDone = false;
+    }
+    if (rx.mode == SYNC_MODE_BEAT && rx.virusID != activeBeatID) {
+        activeBeatID = rx.virusID;
+        beatStartTime = millis();
+        beatActive = true;
+    }
+    if (rx.mode == SYNC_MODE_ZONE && rx.virusID != activeZoneID) {
+        activeZoneID = rx.virusID;
+        zoneStartTime = millis();
+        zoneActive = true;
+    }
+    if (rx.mode == SYNC_MODE_AMBIENT && rx.virusID != activeAmbientID) {
+        activeAmbientID = rx.virusID;
+        ambientStartTime = millis();
+        ambientActive = true;
+        ambientR = (rx.beatCounter >> 16) & 0xFF;
+        ambientG = (rx.beatCounter >> 8) & 0xFF;
+        ambientB = rx.beatCounter & 0xFF;
+    }
+    if (rx.mode == SYNC_MODE_STROBE && rx.virusID != activeStrobeID) {
+        activeStrobeID = rx.virusID;
+        strobeStartTime = millis();
+        strobeActive = true;
     }
 }
 
@@ -339,6 +389,47 @@ void loop() {
             esp_now_send(broadcastMac, (uint8_t *)&txData, sizeof(txData));
         }
     }
+    else if (beatActive && (now - beatStartTime < BEAT_PULSE_MS)) {
+        // BEAT: schneller weisser Puls (150 ms)
+        uint32_t elapsed = now - beatStartTime;
+        uint8_t brightness;
+        if (elapsed < BEAT_PULSE_MS / 2) {
+            brightness = (uint8_t)((elapsed * 255) / (BEAT_PULSE_MS / 2));
+        } else {
+            brightness = (uint8_t)(((BEAT_PULSE_MS - elapsed) * 255) / (BEAT_PULSE_MS / 2));
+        }
+        fill_solid(leds, NUM_LEDS, CRGB::White);
+        nscale8(leds, NUM_LEDS, brightness);
+        txData.mode = SYNC_MODE_BEAT;
+        txData.virusID = activeBeatID;
+    }
+    else if (zoneActive && (now - zoneStartTime < REMOTE_ZONE_MS)) {
+        // ZONE: RSSI-basierte Farbauswahl (Thresholds: -55, -75)
+        CRGB zoneColor;
+        if (smoothRSSI > -55) zoneColor = ZONE0_COLOR;
+        else if (smoothRSSI > -75) zoneColor = ZONE1_COLOR;
+        else zoneColor = ZONE2_COLOR;
+        pulse = beatsin8(60, 150, 255, 0, heartBeatState);
+        fill_solid(leds, NUM_LEDS, zoneColor);
+        nscale8(leds, NUM_LEDS, pulse);
+        txData.mode = SYNC_MODE_ZONE;
+        txData.virusID = activeZoneID;
+    }
+    else if (ambientActive && (now - ambientStartTime < REMOTE_AMBIENT_MS)) {
+        // AMBIENT: Feste Farbe (RGB aus beatCounter encodet)
+        fill_solid(leds, NUM_LEDS, CRGB(ambientR, ambientG, ambientB));
+        txData.mode = SYNC_MODE_AMBIENT;
+        txData.virusID = activeAmbientID;
+    }
+    else if (strobeActive && (now - strobeStartTime < STROBE_DURATION_MS)) {
+        // STROBE: schnelle weisse Blitze (80 ms on/off, 2 s)
+        uint32_t elapsed = now - strobeStartTime;
+        if ((elapsed / STROBE_FLASH_MS) % 2 == 0) {
+            fill_solid(leds, NUM_LEDS, CRGB::White);
+        }
+        txData.mode = SYNC_MODE_STROBE;
+        txData.virusID = activeStrobeID;
+    }
     else if (uniquePeerCount + 1 >= 17) {
         // THE SINGULARITY (≥17 Geräte total: du + sichtbare Peers)
         hueOffset += 5;
@@ -348,6 +439,10 @@ void loop() {
     }
     else {
         waveActive = false;
+        beatActive = false;
+        zoneActive = false;
+        ambientActive = false;
+        strobeActive = false;
         // NORMAL / PRIME (Gesamtzahl = gefundene Peers + dieses Gerät)
         uint8_t totalDevices = uniquePeerCount + 1;
         bool prime = isPrime(totalDevices);
