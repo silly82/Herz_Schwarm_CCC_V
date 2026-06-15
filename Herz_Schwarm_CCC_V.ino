@@ -43,8 +43,11 @@
 #define SYNC_MODE_VIRUS    1  // weißer Blitz (wie Morse -.-.) — 3 s
 #define SYNC_MODE_RAINBOW  2  // Singularity-Regenbogen — 15 s
 #define SYNC_MODE_PRIME    3  // Primzahl-Puls + Sparkles — 12 s
+#define SYNC_MODE_WAVE     4  // Welle: ripple von Basisstation nach RSSI-Distanz
 #define REMOTE_RAINBOW_MS  15000
 #define REMOTE_PRIME_MS    12000
+#define WAVE_DURATION_MS   4000
+#define WAVE_PULSE_MS      700
 
 // --- DATENSTRUKTUR ---
 // Alte Firmware: 13 Byte (magic…mode). Neu: +4 Byte Firmware-Stände, packed ohne Padding.
@@ -95,6 +98,11 @@ uint32_t activeRainbowID = 0;
 uint32_t rainbowStartTime = 0;
 uint32_t activePrimeID = 0;
 uint32_t primePartyStartTime = 0;
+uint32_t activeWaveID = 0;
+uint32_t waveStartTime = 0;
+uint32_t waveDelay = 0;
+bool waveActive = false;
+bool waveReBroadcastDone = false;
 
 // Morse Variablen
 uint32_t btnDownTime = 0;
@@ -178,6 +186,15 @@ void OnDataRecv(const esp_now_recv_info_t *recv_info, const uint8_t *incomingDat
     if (rx.mode == SYNC_MODE_PRIME && rx.virusID != activePrimeID) {
         activePrimeID = rx.virusID;
         primePartyStartTime = millis();
+    }
+    if (rx.mode == SYNC_MODE_WAVE && rx.virusID != activeWaveID) {
+        activeWaveID = rx.virusID;
+        float inputRSSI = constrain(smoothRSSI, -95.0f, -45.0f);
+        float norm = (inputRSSI - (-95.0f)) / (-45.0f - (-95.0f));
+        waveDelay = (uint32_t)((1.0f - norm) * (float)(WAVE_DURATION_MS - WAVE_PULSE_MS));
+        waveStartTime = millis();
+        waveActive = true;
+        waveReBroadcastDone = false;
     }
 }
 
@@ -298,6 +315,30 @@ void loop() {
         txData.mode = SYNC_MODE_PRIME;
         txData.virusID = activePrimeID;
     }
+    else if (waveActive && (now - waveStartTime < WAVE_DURATION_MS)) {
+        // WAVE: ripple von Basisstation, RSSI-basierte Verzögerung
+        uint32_t elapsed = now - waveStartTime;
+        if (elapsed >= waveDelay && elapsed < waveDelay + WAVE_PULSE_MS) {
+            uint32_t pulseElapsed = elapsed - waveDelay;
+            uint8_t brightness;
+            if (pulseElapsed < 200) {
+                brightness = (uint8_t)((pulseElapsed * 255) / 200);
+            } else if (pulseElapsed < 500) {
+                brightness = 255;
+            } else {
+                brightness = (uint8_t)(((WAVE_PULSE_MS - pulseElapsed) * 255) / 200);
+            }
+            fill_solid(leds, NUM_LEDS, CRGB(100, 150, 255));
+            nscale8(leds, NUM_LEDS, brightness);
+        }
+        txData.mode = SYNC_MODE_WAVE;
+        txData.virusID = activeWaveID;
+        if (!waveReBroadcastDone && elapsed >= waveDelay) {
+            waveReBroadcastDone = true;
+            delay(random(5, 25));
+            esp_now_send(broadcastMac, (uint8_t *)&txData, sizeof(txData));
+        }
+    }
     else if (uniquePeerCount + 1 >= 17) {
         // THE SINGULARITY (≥17 Geräte total: du + sichtbare Peers)
         hueOffset += 5;
@@ -306,6 +347,7 @@ void loop() {
         txData.mode = 0;
     }
     else {
+        waveActive = false;
         // NORMAL / PRIME (Gesamtzahl = gefundene Peers + dieses Gerät)
         uint8_t totalDevices = uniquePeerCount + 1;
         bool prime = isPrime(totalDevices);

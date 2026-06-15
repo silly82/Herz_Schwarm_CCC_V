@@ -3,7 +3,7 @@
  *
  * - Lauscht ESP-NOW auf Kanal 13 (kompatibel zu Herz_Schwarm_CCC_V Badges).
  * - Keine regelmäßigen Sends → erscheint nicht in der Peer-Zählung der Badges.
- * - Optional: Effekt-Broadcast (SyncPacket mode 1=Virus, 2=Regenbogen, 3=Primzahl-Party).
+ * - Optional: Effekt-Broadcast (SyncPacket mode 1=Virus, 2=Regenbogen, 3=Primzahl-Party, 4=Welle).
  * - Web-UI + JSON-API; MQTT optional, Broker/Zugangsdaten/Topics per Web-UI (NVS).
  *
  * Pinbelegung W5500 laut Spotpear-Wiki: SCK 13, MISO 12, MOSI 11, CS 14, RST 9, INT 10
@@ -224,7 +224,7 @@ static void handleVirus() {
 
 static void handleEffect() {
     int m = server.arg("m").toInt();
-    if (m < 1 || m > 3) m = 1;
+    if (m < 1 || m > 4) m = 1;
     sendEffectBroadcast((uint8_t)m);
     server.send(200, "text/plain", "ok");
 }
@@ -428,6 +428,7 @@ h1{font-size:1.45rem;font-weight:700;margin:0;letter-spacing:-.02em;}
 .btn-row{display:flex;flex-wrap:wrap;gap:.5rem;margin-top:.35rem}
 .btn-rb{background:linear-gradient(135deg,#6c5ce7,#a855f7);box-shadow:0 4px 18px rgba(108,92,231,.35)}
 .btn-pr{background:linear-gradient(135deg,var(--cyan),#0d9488);box-shadow:0 4px 18px rgba(0,212,170,.3)}
+.btn-wv{background:linear-gradient(135deg,#3b82f6,#6366f1);box-shadow:0 4px 18px rgba(59,130,246,.35)}
 .btn-sec{background:linear-gradient(135deg,#3d3d52,#52526b);box-shadow:0 2px 12px rgba(0,0,0,.25)}
 #msg,#mqmsg{min-height:1.4rem;font-size:.88rem;color:var(--cyan);margin:.5rem 0 0;}
 .form-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:.85rem;margin:.5rem 0 1rem;}
@@ -458,11 +459,12 @@ footer code{background:#12121a;padding:.12rem .35rem;border-radius:6px;border:1p
 </div>
 <div class="card">
 <h2>&#x1F384; Eastereggs (ESP-NOW)</h2>
-<p style="margin:0 0 .75rem;color:var(--muted);font-size:.88rem">Gleiche Effekte wie am Badge: Morse-Virus, Singularity-Regenbogen (17+ Peers), Primzahl-Sparkles &mdash; hier per Funk ausl&ouml;sen. Badges brauchen passende Firmware (Modi 1&ndash;3).</p>
+<p style="margin:0 0 .75rem;color:var(--muted);font-size:.88rem">Gleiche Effekte wie am Badge: Morse-Virus, Singularity-Regenbogen (17+ Peers), Primzahl-Sparkles, Welle (RSSI-Ripple) &mdash; hier per Funk ausl&ouml;sen. Badges brauchen passende Firmware (Modi 1&ndash;4).</p>
 <div class="btn-row">
 <button type="button" class="btn" onclick="doEffect(1)">&#x26A1; Virus (wei&szlig;)</button>
 <button type="button" class="btn btn-rb" onclick="doEffect(2)">&#x1F308; Regenbogen</button>
 <button type="button" class="btn btn-pr" onclick="doEffect(3)">&#x2728; Primzahl-Party</button>
+<button type="button" class="btn btn-wv" onclick="doEffect(4)">&#x1F30A; Welle</button>
 </div>
 <p id="msg"></p>
 </div>
@@ -492,7 +494,7 @@ footer code{background:#12121a;padding:.12rem .35rem;border-radius:6px;border:1p
 <table id="tbl"><thead><tr><th>&#x1F4CD; MAC</th><th>&#x1F4F6; RSSI</th><th>&#x1F4E6; Firmware</th><th>&#x23F1;&#xFE0F; &Delta; ms</th></tr></thead><tbody id="tb"></tbody></table>
 </div>
 <footer>
-&#x1F4CB; API: <code>GET /api/peers</code> &middot; <code>GET/POST /api/mqtt</code> &middot; <code>POST /api/effect?m=1|2|3</code><br>
+&#x1F4CB; API: <code>GET /api/peers</code> &middot; <code>GET/POST /api/mqtt</code> &middot; <code>POST /api/effect?m=1|2|3|4</code><br>
 &#x2728; CCC Herz-Schwarm &mdash; HTTP ist unverschl&uuml;sselt; MQTT-Zugang nur im lokalen Netz setzen.
 </footer>
 </div>
@@ -624,7 +626,7 @@ static void handleApiPeersTable() {
 }
 
 static void sendEffectBroadcast(uint8_t mode) {
-    if (mode < 1 || mode > 3) mode = 1;
+    if (mode < 1 || mode > 4) mode = 1;
     SyncPacket pkt = {};
     pkt.magic_id = MAGIC_ID;
     pkt.beatCounter = (uint32_t)millis();
