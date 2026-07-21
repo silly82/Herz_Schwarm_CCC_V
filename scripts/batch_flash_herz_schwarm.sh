@@ -5,7 +5,9 @@
 # Voraussetzungen: arduino-cli, esptool.py (z. B. Homebrew: brew install arduino-cli esptool)
 #
 # Nutzung:
-#   ./scripts/batch_flash_herz_schwarm.sh
+#   ./scripts/batch_flash_herz_schwarm.sh           # TUI wenn interaktiv + pyserial vorhanden
+#   ./scripts/batch_flash_herz_schwarm.sh --no-gui  # erzwingt Bash-Modus (kein TTY nötig)
+#   ./scripts/batch_flash_herz_schwarm.sh --gui     # erzwingt TUI (Fehler wenn nicht möglich)
 #   ./scripts/batch_flash_herz_schwarm.sh --ports /dev/cu.usbmodem1101 /dev/cu.usbmodem1102
 #   ./scripts/batch_flash_herz_schwarm.sh --all-usb          # heuristisch: /dev/cu.usb* (kein Board-Erkennung nötig)
 #   ./scripts/batch_flash_herz_schwarm.sh --debug            # CDC + Serial-Debug (siehe README)
@@ -31,6 +33,8 @@ while [[ $# -gt 0 ]]; do
     --debug) USE_DEBUG=1; shift ;;
     --no-compile) DO_COMPILE=0; shift ;;
     --all-usb) ALL_USB=1; shift ;;
+    --no-gui) NO_GUI=1; shift ;;
+    --gui) NO_GUI=0; shift ;;
     --ports) shift; while [[ $# -gt 0 && "$1" != --* ]]; do EXPLICIT_PORTS+=("$1"); shift; done ;;
     -h|--help)
       cat << 'HELP'
@@ -169,6 +173,29 @@ HDR
   printf '| %s | %s | `%s` | %s | %s |\n' \
     "$ts" "$firmware" "$port" "$result" "${mac:-—}" >> "${LOG_MD}"
 }
+
+# --- TUI-Launch (wenn interaktiv, kein --no-gui) ---
+GUI_FORCED=0
+if [[ "${NO_GUI:-unset}" == "0" ]]; then
+  GUI_FORCED=1
+fi
+if [[ -z "${NO_GUI:-}" ]] || (( GUI_FORCED )); then
+  if [[ -t 1 ]] || (( GUI_FORCED )); then
+    if command -v python3 >/dev/null 2>&1 && [[ -f "${REPO_ROOT}/scripts/flash_gui.py" ]]; then
+      if python3 -c "import serial" 2>/dev/null; then
+        exec python3 "${REPO_ROOT}/scripts/flash_gui.py" "$@"
+      elif (( GUI_FORCED )); then
+        echo "Fehler: pyserial nicht installiert (pip3 install --user pyserial)" >&2
+        exit 1
+      else
+        echo "Hinweis: pyserial nicht installiert — fallback auf Bash-Modus." >&2
+      fi
+    elif (( GUI_FORCED )); then
+      echo "Fehler: scripts/flash_gui.py nicht gefunden" >&2
+      exit 1
+    fi
+  fi
+fi
 
 # --- Portliste ---
 if ((${#EXPLICIT_PORTS[@]})); then
