@@ -1,4 +1,15 @@
-"""Parse FW_VERSION_* and FW_DEBUG_BUILD defines from an Arduino sketch."""
+"""Parse FW_VERSION_* and FW_DEBUG_BUILD defines from an Arduino sketch.
+
+Versionsschema A.B.C.D (siehe README "Firmware-Version"):
+- A=MAJOR: nur Breaking Changes
+- B=MINOR: große Features
+- C=PATCH: kleine Features / Refactor
+- D=BUILD: Git-Commit-Zähler, NICHT im Code (sonst muss bei jedem Commit
+  neu kompiliert werden). Wird nur als Git-Tag gefuehrt.
+- DEBUG_BUILD: separater Zaehler fuer Debug-Firmware (1..99, sonst Release).
+
+SyncPacket enthaelt nur A.B.C + DEBUG_BUILD-Flag, kein D (Platzbedarf).
+"""
 
 from __future__ import annotations
 
@@ -42,7 +53,7 @@ def read_firmware_version(ino_path: str) -> Version:
 
 
 def firmware_string(version: Tuple[int, int, int, int], debug: bool) -> str:
-    """Format a version tuple for display.
+    """Format a version tuple for display (ohne D, das nur in Git-Tags lebt).
 
     - release (debug=False): "M.N.P"
     - debug (debug=True):    "M.N.DD+debug"  (DD = zero-padded debug build)

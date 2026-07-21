@@ -16,9 +16,18 @@
  *
  * Release-Build (ENABLE_SERIAL_DEBUG=0): Anzeige MAJOR.MINOR.PATCH
  * Debug-Build (ENABLE_SERIAL_DEBUG=1):    Anzeige MAJOR.MINOR.DD — DD zweistellig 01…99
+ *
+ * Versionsschema A.B.C.D (siehe README "Firmware-Version"):
+ *   A = MAJOR: nur auf speziellen Wunsch (Breaking Change / Architektur-Wechsel)
+ *   B = MINOR: großes neues Feature (Beispiel: 1.1.0 -> 1.2.0 = TUI)
+ *   C = PATCH: kleines Feature / Refactor (max 99, danach B hoch)
+ *   D = BUILD: jeder Git-Commit wird hochgezählt, NUR als Git-Tag/Commit-Marker,
+ *              NICHT im Firmware-Code (würde bei jedem Commit neu kompiliert
+ *              werden müssen). Tag-Format: vA.B.C.D, z. B. v1.2.0.5 = 5
+ *              Commits seit 1.2.0 (oder seit letztem A.B.C-Wechsel).
  */
 #define FW_VERSION_MAJOR 1
-#define FW_VERSION_MINOR   1
+#define FW_VERSION_MINOR   2
 #define FW_VERSION_PATCH   0
 #define FW_DEBUG_BUILD     1  // Nur Debug-Zweig: bei sichtbarem neuen Debug-Stand +1, max 99
 
@@ -65,7 +74,9 @@
 
 // --- DATENSTRUKTUR ---
 // Alte Firmware: 13 Byte (magic…mode). Neu: +4 Byte Firmware-Stände, packed ohne Padding.
-// ver_rel = PATCH bei Release (ver_dbg==0); ver_dbg 1…99 = Debug-Build (+debug),0 = Release-Binary.
+// SyncPacket enthaelt A.B.C (ver_rel=PATCH) + ver_dbg (Debug-Build-Zaehler 1..99 oder 0=Release).
+// D (Git-Build-Nummer) wird NICHT per Funk gesendet, nur in Git-Tags gefuehrt (Platz + Kabel-Last).
+// ver_rel = PATCH bei Release (ver_dbg==0); ver_dbg 1…99 = Debug-Build (+debug), 0 = Release-Binary.
 #define SYNC_PACKET_LEGACY_LEN 13
 
 struct __attribute__((packed)) SyncPacket {

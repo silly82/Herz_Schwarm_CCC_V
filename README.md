@@ -189,15 +189,35 @@ python3 scripts/flash_gui.py               # TUI direkt starten
 - **Mit Debug an:** Es erscheinen u. a. alle 2 s eine **Status**-Zeile (Peers, RSSI, Helligkeit, Morse-Puffer) und **sofort** bei jedem erkannten Morse-Zeichen eine Zeile `[Morse]` mit Dauer in ms; nach 800 ms Pause wird das Wort ausgewertet (`VIRUS` bei exakt `-.-.`, sonst `ignoriert`).
 - **Morse-Regel im Code:** Taste gedrückt halten **≤ 250 ms** → Punkt `.`, **> 250 ms** → Strich `-`. Nach **800 ms** ohne neues Zeichen wird der Puffer geleert und geprüft.
 
-### Firmware-Version
-Im Sketch `Herz_Schwarm_CCC_V.ino` oben bei den `FW_*`-Defines.
+### Firmware-Version (Schema A.B.C.D)
 
-**Git-Stand:** Annotierter Tag **`v1.1.0`** auf `main` markiert diesen Stand. Die Basis **`1.1.0`** (`FW_VERSION_MAJOR/MINOR/PATCH`) bezeichnet den **Release-Stand** (ESP-NOW-Schwarm, Primzahl/Singularität, Morse-Virus, FastLED/Waveshare).
+Im Sketch `Herz_Schwarm_CCC_V.ino` oben bei den `FW_VERSION_*`-Defines. Versionsschema **A.B.C.D**:
+
+| Komponente | Name | Bedeutung | Wann erhöhen? |
+|------------|------|-----------|---------------|
+| **A** = `FW_VERSION_MAJOR` | Major | Breaking Change, Architektur-Wechsel | Nur auf speziellen Wunsch (per Diskussion) |
+| **B** = `FW_VERSION_MINOR` | Minor | Großes neues Feature (z. B. TUI, neue Effekte, neues Funk-Protokoll) | Nach Diskussion, vor Merge nach `main` |
+| **C** = `FW_VERSION_PATCH` | Patch | Kleines Feature / Refactor / Bugfix | Nach Diskussion, max 99, danach B hoch |
+| **D** | Build | **Git-Commit-Zähler seit letztem A.B.C-Wechsel** | **Nur in Git-Tags**, nicht im Code (würde sonst Neukompilation bei jedem Commit erfordern). Tag-Format: `v1.2.0.5` = 5 Commits seit `v1.2.0` |
+
+**Anzeige im Badge / Basisstation** (ohne D, da SyncPacket nur 17 Byte hat):
 
 | Build | Anzeige (Beispiel) | Bedeutung |
 |--------|-------------------|-----------|
-| **Release** (`ENABLE_SERIAL_DEBUG=0`) | `1.1.0` | Nur `FW_VERSION_*`; kein Serial-Overhead. |
-| **Debug** (`ENABLE_SERIAL_DEBUG=1`) | `1.1.01+debug` | `FW_VERSION_MAJOR.MINOR` + **`FW_DEBUG_BUILD`** zweistellig (`01`…`99`) + Kennzeichnung `+debug`. |
+| **Release** (`ENABLE_SERIAL_DEBUG=0`) | `1.2.0` | `FW_VERSION_MAJOR.MINOR.PATCH` |
+| **Debug** (`ENABLE_SERIAL_DEBUG=1`) | `1.2.01+debug` | `FW_VERSION_MAJOR.MINOR` + **`FW_DEBUG_BUILD`** zweistellig (`01`…`99`) + Kennzeichnung `+debug` |
+
+**Versions-Helper** (`scripts/version.sh`):
+```bash
+scripts/version.sh current        # aktuelle A.B.C aus .ino
+scripts/version.sh next-tag       # naechster vA.B.C.D-Tag (D = Commits seit vA.B.C.0)
+scripts/version.sh since v1.2.0.0 # Anzahl Commits seit Tag
+scripts/version.sh tag            # annotierten Tag setzen
+```
+
+**Beispiel:** Code-Stand ist `1.2.0`, seit `v1.2.0.0` gab es 5 Commits → Tag `v1.2.0.5`. Nach Merge in `main` und Diskussion über ein neues Feature wird C auf `1` gesetzt → `1.2.1` → nächster Tag wird `v1.2.1.0`. Bump auf `1.3.0` (großes Feature) → C wieder auf `0` → `v1.3.0.0`. Bump auf `2.0.0` (Breaking Change) → kompletter Reset.
+
+**Aktueller Stand:** `1.2.0` (TUI als großes Feature in B) — `v1.1.0` war letzter Tag.
 
 **Änderungen v1.1.0 (Performance-Optimierung):**
 - `String` → `char[12]` für Morse-Puffer (kein Heap-Overhead)
