@@ -40,7 +40,7 @@
 
 #define STATION_FW_MAJOR 0
 #define STATION_FW_MINOR     1
-#define STATION_FW_PATCH     6
+#define STATION_FW_PATCH     7
 
 #define MQTT_NS "hs_mqtt"
 #define MQTT_HOST_DEF    "192.168.1.10"
@@ -630,7 +630,7 @@ static void sendEffectBroadcast(uint8_t mode) {
     SyncPacket pkt = {};
     pkt.magic_id = MAGIC_ID;
     pkt.beatCounter = (uint32_t)millis();
-    pkt.virusID = (uint32_t)(random(1, 100000));
+    pkt.virusID = (uint32_t)esp_random();
     pkt.mode = mode;
     pkt.ver_major = STATION_FW_MAJOR;
     pkt.ver_minor = STATION_FW_MINOR;

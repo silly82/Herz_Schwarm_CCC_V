@@ -2,6 +2,7 @@
 build_debug/
 build_batch/
 build_basestation/
+build_bridge/
 
 # Backup-Dateien
 *.bak

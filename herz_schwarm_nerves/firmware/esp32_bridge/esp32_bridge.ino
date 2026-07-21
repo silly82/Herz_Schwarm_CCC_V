@@ -29,7 +29,7 @@
 #define MAGIC_ID        0x421337CC
 #define BRIDGE_FW_MAJOR 0
 #define BRIDGE_FW_MINOR 1
-#define BRIDGE_FW_PATCH 0
+#define BRIDGE_FW_PATCH 1
 
 #define MAX_JSON_LEN    256
 #define SERIAL_BAUD     115200
@@ -97,7 +97,7 @@ static void handleCommand(const char *json) {
 
     if (strcmp(cmd, "effect") == 0) {
         uint8_t mode = doc["mode"] | 0;
-        uint32_t virusID = doc["virusID"] | (uint32_t)random(1, 1000000);
+        uint32_t virusID = doc["virusID"] | (uint32_t)esp_random();
         uint32_t beatCounter = doc["beatCounter"] | (uint32_t)millis();
 
         if (mode < 1 || mode > 8) {
@@ -161,7 +161,9 @@ void setup() {
 void loop() {
     while (Serial.available()) {
         char c = Serial.read();
-        if (c == '\n' || c == '\r') {
+        if (c == '\r') {
+            continue; // Windows CRLF: skip CR, let LF trigger
+        } else if (c == '\n' || c == '\r') {
             if (linePos > 0) {
                 lineBuf[linePos] = '\0';
                 handleCommand(lineBuf);
@@ -169,6 +171,10 @@ void loop() {
             }
         } else if (linePos < MAX_JSON_LEN - 1) {
             lineBuf[linePos++] = c;
+        } else {
+            // Overflow: flush, signal error
+            linePos = 0;
+            sendError("cmd too long");
         }
     }
     delay(1);

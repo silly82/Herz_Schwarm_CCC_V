@@ -50,8 +50,8 @@ HELP
   esac
 done
 
-ESPTOOL="${ESPTOOL:-$(command -v esptool.py 2>/dev/null || true)}"
-[[ -n "${ESPTOOL}" ]] || ESPTOOL="$(command -v esptool 2>/dev/null || true)"
+ESPTOOL="${ESPTOOL:-$(command -v esptool.py 2>/dev/null)}"
+[[ -n "${ESPTOOL}" ]] || ESPTOOL="$(command -v esptool 2>/dev/null)"
 if [[ -z "${ESPTOOL}" ]]; then
   echo "Fehler: esptool nicht gefunden. Bitte esptool installieren oder ESPTOOL=/pfad/zu/esptool.py setzen." >&2
   exit 1
@@ -114,7 +114,7 @@ collect_ports_all_usb() {
   (
     shopt -s nullglob
     local dev path
-    for path in /dev/cu.usbmodem* /dev/cu.usbserial* /dev/cu.usb* /dev/cu.wchusbserial* /dev/cu.SLAB*; do
+    for path in /dev/cu.usb{modem,serial,}* /dev/cu.wchusbserial* /dev/cu.SLAB*; do
       [[ -e "$path" ]] || continue
       dev="${path#/dev/cu.}"
       case "$dev" in
