@@ -110,14 +110,16 @@ build_batch_gui/                    # TUI-Build-Cache (gitignored)
 Alternative zur ESP32-S3-Basisstation: Phoenix/LiveView Web-UI auf Mac (oder Pi),
 ESP32 als USB-Serial-JSON-Bridge.
 
-- **Start auf Mac**: siehe `herz_schwarm_nerves/MAC_SETUP.md` (Doku fuer Elixir/Phoenix-Dev)
+- **Start auf Mac**: siehe `herz_schwarm_nerves/MAC_SETUP.md` (komplette Doku inkl. C6-Flash, Auto-Detect, Troubleshooting, C6-Spezifika)
 - **Bridge-Firmware**: `herz_schwarm_nerves/firmware/esp32_bridge/esp32_bridge.ino` (115200 Baud, JSON-newline)
 - **GenServer-Architektur**: `Bridge` (UART) → `EffectEngine` (State) → `PeerTracker` (Status) → `DashboardLive` (UI)
 - **PubSub-Topics**: `bridge:events`, `effect:state`, `peers:count`
 - **Effekt-Steuerung** (Modes 1-8) identisch zur ESP32-S3-Basisstation — beide nutzen Kanal 13, MAGIC_ID 0x421337CC
-- **Auto-Detect UART** auf Mac: `/dev/cu.usbserial-1410` oder `/dev/cu.SLAB_USBtoUART`, override via `UART_DEVICE` env
+- **Auto-Detect UART** auf Mac: `Path.wildcard` auf cu.usbserial-*, cu.SLAB_USBtoUART, cu.usbmodem* (XIAO C6)
 - **Reconnect-Backoff** exponential (2s→4s→…→30s) — verhindert Log-Spam bei fehlender Hardware
 - **Nerves-Production-Build** (Raspberry Pi 4) ist optional — der Mac als Dev-Host reicht
+- **Bekannter Bug v1.2.0.3**: `Application.get_env` in `bridge.ex:45` fällt auf hardcoded `/dev/ttyUSB0` Default zurück, Auto-Detect wird ignoriert. Workaround: `UART_DEVICE=/dev/cu.usbmodem101 mix phx.server`. Echter Fix: `Application.fetch_env!` statt `get_env`
+- **Bekannter Bug v1.2.0.3**: `plug_cowboy 2.9.0` crasht sporadisch mit `UndefinedFunctionError: Plug.Cowboy.Translator.translate/4` (nicht mit OTP 28 kompatibel). Workaround: `{:plug_cowboy, "~> 2.6"}` aus `mix.exs` entfernen (Bandit wird bereits genutzt)
 
 ## Known Issues / Pitfalls
 
