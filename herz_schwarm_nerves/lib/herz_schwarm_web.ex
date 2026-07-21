@@ -32,6 +32,23 @@ defmodule HerzSchwarmWeb do
     end
   end
 
+  def live_view do
+    quote do
+      use Phoenix.LiveView,
+        layout: {HerzSchwarmWeb.Layouts, :root}
+
+      unquote(html_helpers())
+    end
+  end
+
+  def live_component do
+    quote do
+      use Phoenix.LiveComponent
+
+      unquote(html_helpers())
+    end
+  end
+
   defp html_helpers do
     quote do
       import Phoenix.HTML

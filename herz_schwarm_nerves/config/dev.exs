@@ -19,25 +19,32 @@ config :herz_schwarm, HerzSchwarmWeb.Endpoint,
     ]
   ]
 
-config :herz_schwarm, :uart_device, herz_schwarm_default_uart_device()
+config :herz_schwarm, :uart_device,
+  (case System.get_env("UART_DEVICE") do
+     nil ->
+       cond do
+         match?({:win32, _}, :os.type()) -> "COM3"
+         true ->
+           case Path.wildcard("/dev/cu.usbserial-*") do
+             [first | _] -> first
+             [] ->
+               case Path.wildcard("/dev/cu.SLAB_USBtoUART") do
+                 [first | _] -> first
+                 [] ->
+                   case Path.wildcard("/dev/cu.usbmodem*") do
+                     [first | _] -> first
+                     [] -> "/dev/ttyUSB0"
+                   end
+               end
+           end
+       end
+     dev -> dev
+   end)
 config :herz_schwarm, bridge_enabled: true
 
 config :phoenix, :stacktrace_depth, 20
 config :phoenix, :plug_init_mode, :runtime
 
-# Pick a sensible default UART device for the host platform.
-# macOS:  /dev/cu.usbserial-* or /dev/cu.SLAB_USBtoUART (ESP32-S3 USB-CDC)
+# macOS:  /dev/cu.usbserial-*, /dev/cu.SLAB_USBtoUART, /dev/cu.usbmodem* (XIAO native USB)
 # Linux:  /dev/ttyUSB0 (typical for CH340/CP2102 USB-serial bridges)
 # Override with: UART_DEVICE=/dev/cu.usbmodem14101 mix phx.server
-defp herz_schwarm_default_uart_device do
-  case System.get_env("UART_DEVICE") do
-    nil ->
-      cond do
-        match?({:win32, _}, :os.type()) -> "COM3"
-        File.exists?("/dev/cu.usbserial-1410") -> "/dev/cu.usbserial-1410"
-        File.exists?("/dev/cu.SLAB_USBtoUART") -> "/dev/cu.SLAB_USBtoUART"
-        true -> "/dev/ttyUSB0"
-      end
-    dev -> dev
-  end
-end

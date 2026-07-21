@@ -3,7 +3,6 @@ defmodule HerzSchwarm.MixProject do
 
   @app :herz_schwarm
   @version "0.1.0"
-  @all_targets [:rpi4]
 
   def project do
     [
@@ -44,11 +43,11 @@ defmodule HerzSchwarm.MixProject do
 
   defp deps do
     [
-      # Nerves
-      {:nerves, "~> 1.10", runtime: false, targets: @all_targets},
+      # Nerves (required on host too — bootstrap checks for it, even if targets: :rpi4)
+      {:nerves, "~> 1.10", runtime: false},
       {:nerves_system_rpi4, "~> 1.27", targets: :rpi4},
-      {:nerves_runtime, "~> 0.13", targets: @all_targets},
-      {:nerves_pack, "~> 0.7", targets: @all_targets},
+      {:nerves_runtime, "~> 0.13", targets: :rpi4},
+      {:nerves_pack, "~> 0.7", targets: :rpi4},
 
       # Phoenix / Web
       {:phoenix, "~> 1.7"},
@@ -56,10 +55,12 @@ defmodule HerzSchwarm.MixProject do
       {:phoenix_live_view, "~> 0.20"},
       {:phoenix_live_reload, "~> 1.4", only: :dev},
       {:phoenix_live_dashboard, "~> 0.8"},
+      {:gettext, "~> 0.26"},
       {:esbuild, "~> 0.8", runtime: Mix.env() == :dev},
       {:tailwind, "~> 0.2", runtime: Mix.env() == :dev},
       {:jason, "~> 1.4"},
       {:plug_cowboy, "~> 2.6"},
+      {:telemetry_poller, "~> 1.0"},
       {:heroicons,
        github: "tailwindlabs/heroicons",
        tag: "v2.1.1",

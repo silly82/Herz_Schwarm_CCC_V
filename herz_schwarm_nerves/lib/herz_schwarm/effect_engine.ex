@@ -8,6 +8,7 @@ defmodule HerzSchwarm.EffectEngine do
 
   use GenServer
   require Logger
+  import Bitwise
 
   alias HerzSchwarm.Bridge
 
@@ -146,22 +147,6 @@ defmodule HerzSchwarm.EffectEngine do
     {:noreply, state}
   end
 
-  # Cancel any pending beat_tick, draining any already-queued message.
-  # This avoids a race where :beat_tick fires after set_bpm(0) and re-arms.
-  defp cancel_beat_timer(state) do
-    case state.beat_timer do
-      nil -> state
-      ref ->
-        Process.cancel_timer(ref)
-        # Drain any :beat_tick already in the mailbox
-        receive do
-          :beat_tick -> :ok
-        after 0 -> :ok
-        end
-        %{state | beat_timer: nil}
-    end
-  end
-
   def handle_cast(:tap_beat, state) do
     id = System.unique_integer([:positive])
 
@@ -185,8 +170,8 @@ defmodule HerzSchwarm.EffectEngine do
   end
 
   def handle_cast(:stop_all, state) do
-    if state.beat_timer, do: Process.cancel_timer(state.beat_timer)
-    state = %{state | active_mode: 0, active_id: 0, beat_active: false, beat_timer: nil}
+    state = cancel_beat_timer(state)
+    state = %{state | active_mode: 0, active_id: 0, beat_active: false}
     broadcast_state(state)
     {:noreply, state}
   end
@@ -213,6 +198,22 @@ defmodule HerzSchwarm.EffectEngine do
 
   def handle_info(:beat_tick, state) do
     {:noreply, %{state | beat_timer: nil}}
+  end
+
+  # Cancel any pending beat_tick, draining any already-queued message.
+  # This avoids a race where :beat_tick fires after set_bpm(0) and re-arms.
+  defp cancel_beat_timer(state) do
+    case state.beat_timer do
+      nil -> state
+      ref ->
+        Process.cancel_timer(ref)
+        # Drain any :beat_tick already in the mailbox
+        receive do
+          :beat_tick -> :ok
+        after 0 -> :ok
+        end
+        %{state | beat_timer: nil}
+    end
   end
 
   defp broadcast_state(state) do

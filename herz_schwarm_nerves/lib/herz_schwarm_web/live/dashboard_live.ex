@@ -237,16 +237,16 @@ defmodule HerzSchwarmWeb.DashboardLive do
   defp btn_class(8), do: "btn-strobe"
 
   defp color_to_hex({r, g, b}) do
-    "#" <>
-      Integer.to_string(r, 16) |> String.pad_leading(2, "0") <>
-      Integer.to_string(g, 16) |> String.pad_leading(2, "0") <>
-      Integer.to_string(b, 16) |> String.pad_leading(2, "0")
+    r_hex = r |> Integer.to_string(16) |> String.pad_leading(2, "0")
+    g_hex = g |> Integer.to_string(16) |> String.pad_leading(2, "0")
+    b_hex = b |> Integer.to_string(16) |> String.pad_leading(2, "0")
+    "#" <> r_hex <> g_hex <> b_hex
   end
 
   defp hex_to_rgb("#" <> hex) do
-    {r, _} = String.slice(hex, 0, 2) |> Integer.parse(16)
-    {g, _} = String.slice(hex, 2, 2) |> Integer.parse(16)
-    {b, _} = String.slice(hex, 4, 2) |> Integer.parse(16)
+    r = String.slice(hex, 0, 2) |> Integer.parse(16) |> elem(0)
+    g = String.slice(hex, 2, 2) |> Integer.parse(16) |> elem(0)
+    b = String.slice(hex, 4, 2) |> Integer.parse(16) |> elem(0)
     {r, g, b}
   end
 end
