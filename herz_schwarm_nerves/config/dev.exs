@@ -19,32 +19,14 @@ config :herz_schwarm, HerzSchwarmWeb.Endpoint,
     ]
   ]
 
-config :herz_schwarm, :uart_device,
-  (case System.get_env("UART_DEVICE") do
-     nil ->
-       cond do
-         match?({:win32, _}, :os.type()) -> "COM3"
-         true ->
-           case Path.wildcard("/dev/cu.usbserial-*") do
-             [first | _] -> first
-             [] ->
-               case Path.wildcard("/dev/cu.SLAB_USBtoUART") do
-                 [first | _] -> first
-                 [] ->
-                   case Path.wildcard("/dev/cu.usbmodem*") do
-                     [first | _] -> first
-                     [] -> "/dev/ttyUSB0"
-                   end
-               end
-           end
-       end
-     dev -> dev
-   end)
+# :uart_device wird in config/config.exs gesetzt (vor import_config),
+# damit es schon zur Application.start/2-Zeit verfuegbar ist. Hier nur
+# Override moeglich (z. B. expliziter Test mit COM3 auf Windows).
+
 config :herz_schwarm, bridge_enabled: true
 
 config :phoenix, :stacktrace_depth, 20
 config :phoenix, :plug_init_mode, :runtime
 
-# macOS:  /dev/cu.usbserial-*, /dev/cu.SLAB_USBtoUART, /dev/cu.usbmodem* (XIAO native USB)
-# Linux:  /dev/ttyUSB0 (typical for CH340/CP2102 USB-serial bridges)
-# Override with: UART_DEVICE=/dev/cu.usbmodem14101 mix phx.server
+# UART-Device wird in config.exs mit Path.wildcard-Auto-Detect aufgeloest.
+# Override via UART_DEVICE=/dev/cu.usbmodem101 env var.

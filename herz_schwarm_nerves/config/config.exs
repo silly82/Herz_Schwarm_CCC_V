@@ -33,4 +33,31 @@ config :tailwind,
 
 config :logger, backends: [:console]
 
+# UART-Device wird in dev.exs gesetzt, ABER Application.start/2 läuft vor
+# der import_config-Resolution, sodass uart_device zur Bridge-Init-Zeit leer
+# sein kann. Wir setzen hier einen hartcodierten Default, der ueberschrieben
+# wird, sobald dev.exs laeuft. Verwendet Path.wildcard, um den ersten
+# macOS-USB-Serial-Port zu finden; faellt auf /dev/ttyUSB0 fuer Linux-Dev zurueck.
+config :herz_schwarm, :uart_device,
+  (case System.get_env("UART_DEVICE") do
+     nil ->
+       cond do
+         match?({:win32, _}, :os.type()) -> "COM3"
+         true ->
+           case Path.wildcard("/dev/cu.usbserial-*") do
+             [first | _] -> first
+             [] ->
+               case Path.wildcard("/dev/cu.SLAB_USBtoUART") do
+                 [first | _] -> first
+                 [] ->
+                   case Path.wildcard("/dev/cu.usbmodem*") do
+                     [first | _] -> first
+                     [] -> "/dev/ttyUSB0"
+                   end
+               end
+           end
+       end
+     dev -> dev
+   end)
+
 import_config "#{config_env()}.exs"

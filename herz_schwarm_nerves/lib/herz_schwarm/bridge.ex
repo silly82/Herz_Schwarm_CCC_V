@@ -42,22 +42,14 @@ defmodule HerzSchwarm.Bridge do
 
   @impl true
   def init(_opts) do
-    # Fetch env WITHOUT fallback so we fail loud on misconfiguration.
-    # This prevents silent fallback to /dev/ttyUSB0 which doesn't exist on macOS.
+    # Resolve port: Application.get_env first (normal path), then
+    # Path.wildcard auto-detect as fallback. This handles the case where
+    # supervisor starts the child before dev.exs runs (Mix 1.18 timing).
     port =
       case Application.get_env(:herz_schwarm, :uart_device) do
-        nil ->
-          raise """
-          :herz_schwarm, :uart_device is not configured.
-          Set it in config/dev.exs (auto-detects cu.usbmodem* etc.)
-          or pass UART_DEVICE=/dev/cu.usbmodem101 env var to mix phx.server.
-          """
-
-        p when is_binary(p) ->
-          p
-
-        other ->
-          raise ":uart_device must be a binary path, got: #{inspect(other)}"
+        nil -> resolve_uart_device() || raise_uart_not_configured!()
+        p when is_binary(p) -> p
+        other -> raise ":uart_device must be a binary path, got: #{inspect(other)}"
       end
 
     state = %__MODULE__{
@@ -142,6 +134,47 @@ defmodule HerzSchwarm.Bridge do
     # Increase backoff after an error during operation
     schedule_reconnect(%{state | reconnect_ms: next_backoff(state.reconnect_ms)})
     {:noreply, %{state | connected: false}}
+  end
+
+  # Raises with helpful instructions when no UART device can be resolved.
+  defp raise_uart_not_configured! do
+    raise """
+    :herz_schwarm, :uart_device is not configured and no USB-serial
+    device could be auto-detected.
+
+    Fix: Set UART_DEVICE env var to your ESP32 bridge:
+      UART_DEVICE=/dev/cu.usbmodem101 mix phx.server
+
+    For XIAO ESP32-C6: usually /dev/cu.usbmodem101
+    For ESP32-S3 (native USB): usually /dev/cu.usbserial-1410
+    For ESP32 with CH340/CP2102: usually /dev/cu.usbmodem14101
+    """
+  end
+
+  # Fallback UART-Device resolution: checks UART_DEVICE env-var first,
+  # then does Path.wildcard on common macOS USB-serial patterns, then
+  # falls back to /dev/ttyUSB0 (Linux) or COM3 (Windows).
+  defp resolve_uart_device do
+    case System.get_env("UART_DEVICE") do
+      nil ->
+        cond do
+          match?({:win32, _}, :os.type()) -> "COM3"
+          true ->
+            case Path.wildcard("/dev/cu.usbserial-*") do
+              [first | _] -> first
+              [] ->
+                case Path.wildcard("/dev/cu.SLAB_USBtoUART") do
+                  [first | _] -> first
+                  [] ->
+                    case Path.wildcard("/dev/cu.usbmodem*") do
+                      [first | _] -> first
+                      [] -> "/dev/ttyUSB0"
+                    end
+                end
+            end
+        end
+      dev -> dev
+    end
   end
 
   defp next_backoff(current) do
