@@ -18,9 +18,9 @@
  * Debug-Build (ENABLE_SERIAL_DEBUG=1):    Anzeige MAJOR.MINOR.DD — DD zweistellig 01…99
  */
 #define FW_VERSION_MAJOR 1
-#define FW_VERSION_MINOR   0
+#define FW_VERSION_MINOR   1
 #define FW_VERSION_PATCH   0
-#define FW_DEBUG_BUILD     2  // Nur Debug-Zweig: bei sichtbarem neuen Debug-Stand +1, max 99
+#define FW_DEBUG_BUILD     1  // Nur Debug-Zweig: bei sichtbarem neuen Debug-Stand +1, max 99
 
 #if FW_DEBUG_BUILD < 1 || FW_DEBUG_BUILD > 99
 #error "FW_DEBUG_BUILD muss zwischen 1 und 99 liegen (zweistelliger Debug-Zähler)."
@@ -102,39 +102,43 @@ PeerTracker seenPeers[MAX_PEERS];
 uint8_t uniquePeerCount = 0;
 
 // --- VARIABLEN ---
-float smoothRSSI = -95;   
-uint32_t heartBeatState = 0; 
+volatile float smoothRSSI = -95;   // volatile: wird in ISR (OnDataRecv) geschrieben
+uint32_t heartBeatState = 0;
 uint8_t hueOffset = 0;
 uint8_t broadcastMac[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
-uint32_t activeVirusID = 0;
-uint32_t virusStartTime = 0;
-uint32_t activeRainbowID = 0;
-uint32_t rainbowStartTime = 0;
-uint32_t activePrimeID = 0;
-uint32_t primePartyStartTime = 0;
-uint32_t activeWaveID = 0;
-uint32_t waveStartTime = 0;
-uint32_t waveDelay = 0;
-bool waveActive = false;
-bool waveReBroadcastDone = false;
-uint32_t activeBeatID = 0;
-uint32_t beatStartTime = 0;
-bool beatActive = false;
-uint32_t activeZoneID = 0;
-uint32_t zoneStartTime = 0;
-bool zoneActive = false;
-uint32_t activeAmbientID = 0;
-uint32_t ambientStartTime = 0;
-bool ambientActive = false;
-uint8_t ambientR = 0, ambientG = 0, ambientB = 0;
-uint32_t activeStrobeID = 0;
-uint32_t strobeStartTime = 0;
-bool strobeActive = false;
 
-// Morse Variablen
+// Effect-State-Struct: ersetzt 8× copy-paste Variablen
+struct EffectState {
+    uint32_t id;
+    uint32_t startTime;
+    bool active;
+};
+enum EffectIdx : uint8_t { E_VIRUS=0, E_RAINBOW, E_PRIME, E_WAVE, E_BEAT, E_ZONE, E_AMBIENT, E_STROBE, E_COUNT };
+EffectState fx[E_COUNT] = {};
+
+// Wave-spezifisch
+uint32_t waveDelay = 0;
+bool waveReBroadcastDone = false;
+uint32_t waveReBroadcastAt = 0;
+
+// Ambient-spezifisch
+uint8_t ambientR = 0, ambientG = 0, ambientB = 0;
+
+// Morse: char-Array statt String (kein Heap)
+char morseBuf[12] = {0};
+uint8_t morseLen = 0;
 uint32_t btnDownTime = 0;
-String morseInput = "";
 uint32_t lastBtnRelease = 0;
+
+// Primzahl-LUT für 1..26 (MAX_PEERS+1)
+static const bool primeLUT[27] = {
+    0,0,1,1,0,1,0,1,0,0,  // 0..9
+    0,1,0,1,0,0,0,1,0,1,  // 10..19
+    0,0,0,1,0,0,0         // 20..26
+};
+
+// Herz-Maske als 64-Bit Bitmaske (1 = Herz-Pixel)
+static uint64_t heartMask64;
 
 CRGB heartColor = CRGB(255, 0, 150); // Cyber-Pink
 
@@ -145,36 +149,55 @@ static void printFwVersionBanner() {
 }
 #endif
 
-// --- HELPER: PRIMZAHL ---
-bool isPrime(int n) {
-    if (n <= 1) return false;
-    if (n <= 3) return true;
-    if (n % 2 == 0 || n % 3 == 0) return false;
-    for (int i = 5; i * i <= n; i += 6) if (n % i == 0 || n % (i + 2) == 0) return false;
-    return true;
+// --- HELPER: PRIMZAHL (LUT, O(1)) ---
+static inline bool isPrimeFast(uint8_t n) {
+    return (n < 27) ? primeLUT[n] : false;
 }
 
-// --- PEER TRACKING LOGIK ---
+// --- PEER TRACKING: Hash-Index statt O(n²) ---
+// MAC[5] als Index (letztes Byte), Kollisionsliste
+static int8_t peerHashHead[256];
+static int8_t peerHashNext[MAX_PEERS];
+
+static void peerHashInit() {
+    memset(peerHashHead, -1, sizeof(peerHashHead));
+    memset(peerHashNext, -1, sizeof(peerHashNext));
+}
+
+static int peerHashFind(const uint8_t* mac) {
+    int8_t idx = peerHashHead[mac[5]];
+    while (idx >= 0) {
+        if (memcmp(seenPeers[idx].mac, mac, 6) == 0) return idx;
+        idx = peerHashNext[idx];
+    }
+    return -1;
+}
+
+static void peerHashInsert(uint8_t slot, const uint8_t* mac) {
+    peerHashNext[slot] = peerHashHead[mac[5]];
+    peerHashHead[mac[5]] = slot;
+}
+
 static void trackBadge(const uint8_t* mac, bool hasVer, uint8_t vmaj, uint8_t vmin, uint8_t vrel,
                        uint8_t vdbg) {
     uint32_t now = millis();
-    for (int i = 0; i < MAX_PEERS; i++) {
-        if (memcmp(seenPeers[i].mac, mac, 6) == 0) {
-            seenPeers[i].lastSeen = now;
-            if (hasVer) {
-                seenPeers[i].ver_major = vmaj;
-                seenPeers[i].ver_minor = vmin;
-                seenPeers[i].ver_rel = vrel;
-                seenPeers[i].ver_dbg = vdbg;
-                seenPeers[i].ver_known = 1;
-            }
-            return;
+    int found = peerHashFind(mac);
+    if (found >= 0) {
+        seenPeers[found].lastSeen = now;
+        if (hasVer) {
+            seenPeers[found].ver_major = vmaj;
+            seenPeers[found].ver_minor = vmin;
+            seenPeers[found].ver_rel = vrel;
+            seenPeers[found].ver_dbg = vdbg;
+            seenPeers[found].ver_known = 1;
         }
+        return;
     }
     for (int i = 0; i < MAX_PEERS; i++) {
         if (seenPeers[i].lastSeen == 0) {
             memcpy(seenPeers[i].mac, mac, 6);
             seenPeers[i].lastSeen = now;
+            peerHashInsert(i, mac);
             if (hasVer) {
                 seenPeers[i].ver_major = vmaj;
                 seenPeers[i].ver_minor = vmin;
@@ -199,53 +222,36 @@ void OnDataRecv(const esp_now_recv_info_t *recv_info, const uint8_t *incomingDat
     trackBadge(recv_info->src_addr, hasVer, rx.ver_major, rx.ver_minor, rx.ver_rel, rx.ver_dbg);
 
     float currentRSSI = (float)recv_info->rx_ctrl->rssi;
-    smoothRSSI = (0.05 * currentRSSI) + (0.95 * smoothRSSI);
+    smoothRSSI = (0.05f * currentRSSI) + (0.95f * smoothRSSI);
     heartBeatState = rx.beatCounter;
 
-    if (rx.mode == SYNC_MODE_VIRUS && rx.virusID != activeVirusID) {
-        activeVirusID = rx.virusID;
-        virusStartTime = millis();
-    }
-    if (rx.mode == SYNC_MODE_RAINBOW && rx.virusID != activeRainbowID) {
-        activeRainbowID = rx.virusID;
-        rainbowStartTime = millis();
-    }
-    if (rx.mode == SYNC_MODE_PRIME && rx.virusID != activePrimeID) {
-        activePrimeID = rx.virusID;
-        primePartyStartTime = millis();
-    }
-    if (rx.mode == SYNC_MODE_WAVE && rx.virusID != activeWaveID) {
-        activeWaveID = rx.virusID;
+    const uint32_t now = millis();
+    #define FX_START(idx, rxid) do { if ((rxid) != fx[idx].id) { fx[idx].id = (rxid); fx[idx].startTime = now; fx[idx].active = true; } } while(0)
+
+    if (rx.mode == SYNC_MODE_VIRUS)   FX_START(E_VIRUS,   rx.virusID);
+    if (rx.mode == SYNC_MODE_RAINBOW) FX_START(E_RAINBOW, rx.virusID);
+    if (rx.mode == SYNC_MODE_PRIME)   FX_START(E_PRIME,   rx.virusID);
+    if (rx.mode == SYNC_MODE_WAVE && rx.virusID != fx[E_WAVE].id) {
+        fx[E_WAVE].id = rx.virusID;
         float inputRSSI = constrain(smoothRSSI, -95.0f, -45.0f);
-        float norm = (inputRSSI - (-95.0f)) / (-45.0f - (-95.0f));
+        float norm = (inputRSSI - (-95.0f)) / 50.0f;
         waveDelay = (uint32_t)((1.0f - norm) * (float)(WAVE_DURATION_MS - WAVE_PULSE_MS));
-        waveStartTime = millis();
-        waveActive = true;
+        fx[E_WAVE].startTime = now;
+        fx[E_WAVE].active = true;
         waveReBroadcastDone = false;
     }
-    if (rx.mode == SYNC_MODE_BEAT && rx.virusID != activeBeatID) {
-        activeBeatID = rx.virusID;
-        beatStartTime = millis();
-        beatActive = true;
-    }
-    if (rx.mode == SYNC_MODE_ZONE && rx.virusID != activeZoneID) {
-        activeZoneID = rx.virusID;
-        zoneStartTime = millis();
-        zoneActive = true;
-    }
-    if (rx.mode == SYNC_MODE_AMBIENT && rx.virusID != activeAmbientID) {
-        activeAmbientID = rx.virusID;
-        ambientStartTime = millis();
-        ambientActive = true;
+    if (rx.mode == SYNC_MODE_BEAT)    FX_START(E_BEAT,    rx.virusID);
+    if (rx.mode == SYNC_MODE_ZONE)    FX_START(E_ZONE,    rx.virusID);
+    if (rx.mode == SYNC_MODE_AMBIENT && rx.virusID != fx[E_AMBIENT].id) {
+        fx[E_AMBIENT].id = rx.virusID;
+        fx[E_AMBIENT].startTime = now;
+        fx[E_AMBIENT].active = true;
         ambientR = (rx.beatCounter >> 16) & 0xFF;
         ambientG = (rx.beatCounter >> 8) & 0xFF;
         ambientB = rx.beatCounter & 0xFF;
     }
-    if (rx.mode == SYNC_MODE_STROBE && rx.virusID != activeStrobeID) {
-        activeStrobeID = rx.virusID;
-        strobeStartTime = millis();
-        strobeActive = true;
-    }
+    if (rx.mode == SYNC_MODE_STROBE)  FX_START(E_STROBE,  rx.virusID);
+    #undef FX_START
 }
 
 void setup() {
@@ -254,18 +260,24 @@ void setup() {
     printFwVersionBanner();
 #endif
     pinMode(BUTTON_PIN, INPUT_PULLUP);
-    
+
+    // Herz-Bitmaske einmalig aus Array aufbauen
+    for (int i = 0; i < 64; i++) {
+        if (heartMask[i / 8][i % 8]) heartMask64 |= (1ULL << i);
+    }
+    peerHashInit();
+
     WiFi.mode(WIFI_STA);
     esp_wifi_set_protocol(WIFI_IF_STA, WIFI_PROTOCOL_11G | WIFI_PROTOCOL_11N);
     esp_wifi_set_channel(CCC_CHANNEL, WIFI_SECOND_CHAN_NONE);
-    esp_wifi_set_max_tx_power(52); 
+    esp_wifi_set_max_tx_power(52);
     WiFi.setSleep(false);
 
     if (esp_now_init() != ESP_OK) return;
 
     esp_now_peer_info_t peerInfo = {};
     memcpy(peerInfo.peer_addr, broadcastMac, 6);
-    peerInfo.channel = CCC_CHANNEL; 
+    peerInfo.channel = CCC_CHANNEL;
     peerInfo.encrypt = false;
     esp_now_add_peer(&peerInfo);
     esp_now_register_recv_cb(OnDataRecv);
@@ -279,33 +291,39 @@ void setup() {
 void loop() {
     uint32_t now = millis();
 
-    // 1. MORSE ERKENNUNG
+    // 1. MORSE ERKENNUNG (char-Array statt String)
     bool btn = (digitalRead(BUTTON_PIN) == LOW);
     if (btn && btnDownTime == 0) btnDownTime = now;
     if (!btn && btnDownTime != 0) {
         uint32_t duration = now - btnDownTime;
-        morseInput += (duration > 250) ? "-" : ".";
+        char sym = (duration > 250) ? '-' : '.';
+        if (morseLen < sizeof(morseBuf) - 1) {
+            morseBuf[morseLen++] = sym;
+            morseBuf[morseLen] = '\0';
+        }
 #if ENABLE_SERIAL_DEBUG
-        Serial.printf("[Morse] +%s (%lu ms) Puffer: \"%s\"\n",
-                      (duration > 250) ? "-" : ".", (unsigned long)duration, morseInput.c_str());
+        Serial.printf("[Morse] +%c (%lu ms) Puffer: \"%s\"\n",
+                      sym, (unsigned long)duration, morseBuf);
 #endif
         btnDownTime = 0;
         lastBtnRelease = now;
     }
-    if (morseInput.length() > 0 && (now - lastBtnRelease > 800)) {
-        if (morseInput == "-.-.") { 
-            activeVirusID = random(1, 100000); 
-            virusStartTime = now;
+    if (morseLen > 0 && (now - lastBtnRelease > 800)) {
+        if (strcmp(morseBuf, "-.-.") == 0) {
+            fx[E_VIRUS].id = (uint32_t)(esp_random() % 99999) + 1;
+            fx[E_VIRUS].startTime = now;
+            fx[E_VIRUS].active = true;
 #if ENABLE_SERIAL_DEBUG
             Serial.println("[Morse] Wortende -> VIRUS (-.-.)");
 #endif
         }
 #if ENABLE_SERIAL_DEBUG
         else {
-            Serial.printf("[Morse] Wortende -> ignoriert (\"%s\")\n", morseInput.c_str());
+            Serial.printf("[Morse] Wortende -> ignoriert (\"%s\")\n", morseBuf);
         }
 #endif
-        morseInput = ""; 
+        morseLen = 0;
+        morseBuf[0] = '\0';
     }
 
     // 2. PEER COUNT & TIMEOUT CLEANUP
@@ -314,60 +332,65 @@ void loop() {
         if (seenPeers[i].lastSeen != 0) {
             if (now - seenPeers[i].lastSeen > PEER_TIMEOUT) {
                 seenPeers[i].lastSeen = 0;
+                // Hash-Eintrag bleibt — lastSeen==0 reicht als "frei"-Marker
             } else {
                 uniquePeerCount++;
             }
         }
     }
 
-    // 3. DYNAMISCHES FADE-OUT (Der Fix!)
+    // 3. DYNAMISCHES FADE-OUT
+    float rssiSnapshot;
+    noInterrupts();
+    rssiSnapshot = smoothRSSI;
+    interrupts();
     if (uniquePeerCount == 0) {
-        // 2-Sekunden Fade-Out: 50 Einheiten in 100 Frames (bei 20ms) = 0.5 pro Frame
-        if (smoothRSSI > -95) smoothRSSI -= 0.5; 
+        if (rssiSnapshot > -95) rssiSnapshot -= 0.5f;
     } else {
-        // Minimales Absinken zur Stabilisierung
-        smoothRSSI -= 0.01; 
+        rssiSnapshot -= 0.01f;
     }
-    if (smoothRSSI < -95) smoothRSSI = -95;
+    if (rssiSnapshot < -95) rssiSnapshot = -95;
+    noInterrupts();
+    smoothRSSI = rssiSnapshot;
+    interrupts();
 
     // 4. RSSI MAPPING
-    float inputRSSI = constrain(smoothRSSI, -95, -45);
-    float norm = (inputRSSI - (-95)) / (-45 - (-95)); 
-    float power = norm * norm; 
-    uint8_t currentBright = BRIGHT_MIN + (power * (BRIGHT_MAX - BRIGHT_MIN));
-    heartBeatState += (2 + (power * 10));
+    float inputRSSI = constrain(rssiSnapshot, -95, -45);
+    float norm = (inputRSSI - (-95)) / 50.0f;
+    float power = norm * norm;
+    uint8_t currentBright = BRIGHT_MIN + (uint8_t)(power * (BRIGHT_MAX - BRIGHT_MIN));
+    heartBeatState += 2 + (uint32_t)(power * 10.0f);
 
     // 5. ANIMATIONS-WEICHE
     FastLED.clear();
-    uint8_t pulse;
+    uint8_t pulse = 0;
+    uint8_t activeMode = 0;      // für txData.mode
+    uint32_t activeFxId = 0;     // für txData.virusID
 
-    if (now - virusStartTime < 3000) {
+    if (fx[E_VIRUS].active && (now - fx[E_VIRUS].startTime < 3000)) {
         // MORSE / REMOTE VIRUS BLITZ
-        uint32_t flash = (now - virusStartTime) % 300;
+        uint32_t flash = (now - fx[E_VIRUS].startTime) % 300;
         if (flash < 150) fill_solid(leds, NUM_LEDS, CRGB::White);
-        txData.mode = SYNC_MODE_VIRUS;
-        txData.virusID = activeVirusID;
+        activeMode = SYNC_MODE_VIRUS;
+        activeFxId = fx[E_VIRUS].id;
     }
-    else if (now - rainbowStartTime < REMOTE_RAINBOW_MS) {
-        // REMOTE REGENBOGEN (gleiche Optik wie Singularity)
+    else if (fx[E_RAINBOW].active && (now - fx[E_RAINBOW].startTime < REMOTE_RAINBOW_MS)) {
         hueOffset += 5;
         pulse = beatsin8(100, 150, 255, 0, heartBeatState);
         for (int i = 0; i < NUM_LEDS; i++) leds[i] = CHSV(hueOffset + (i*3), 255, pulse);
-        txData.mode = SYNC_MODE_RAINBOW;
-        txData.virusID = activeRainbowID;
+        activeMode = SYNC_MODE_RAINBOW;
+        activeFxId = fx[E_RAINBOW].id;
     }
-    else if (now - primePartyStartTime < REMOTE_PRIME_MS) {
-        // REMOTE PRIMZAHL-PARTY (Optik wie lokale Primzahl-Phase)
+    else if (fx[E_PRIME].active && (now - fx[E_PRIME].startTime < REMOTE_PRIME_MS)) {
         pulse = beatsin8(80, 120, 255, 0, heartBeatState);
         fill_solid(leds, NUM_LEDS, heartColor);
         nscale8(leds, NUM_LEDS, pulse);
         if (random8() > 210) leds[random8(64)] = CRGB::White;
-        txData.mode = SYNC_MODE_PRIME;
-        txData.virusID = activePrimeID;
+        activeMode = SYNC_MODE_PRIME;
+        activeFxId = fx[E_PRIME].id;
     }
-    else if (waveActive && (now - waveStartTime < WAVE_DURATION_MS)) {
-        // WAVE: ripple von Basisstation, RSSI-basierte Verzögerung
-        uint32_t elapsed = now - waveStartTime;
+    else if (fx[E_WAVE].active && (now - fx[E_WAVE].startTime < WAVE_DURATION_MS)) {
+        uint32_t elapsed = now - fx[E_WAVE].startTime;
         if (elapsed >= waveDelay && elapsed < waveDelay + WAVE_PULSE_MS) {
             uint32_t pulseElapsed = elapsed - waveDelay;
             uint8_t brightness;
@@ -381,17 +404,15 @@ void loop() {
             fill_solid(leds, NUM_LEDS, CRGB(100, 150, 255));
             nscale8(leds, NUM_LEDS, brightness);
         }
-        txData.mode = SYNC_MODE_WAVE;
-        txData.virusID = activeWaveID;
+        activeMode = SYNC_MODE_WAVE;
+        activeFxId = fx[E_WAVE].id;
         if (!waveReBroadcastDone && elapsed >= waveDelay) {
             waveReBroadcastDone = true;
-            delay(random(5, 25));
-            esp_now_send(broadcastMac, (uint8_t *)&txData, sizeof(txData));
+            waveReBroadcastAt = now + random(5, 25);
         }
     }
-    else if (beatActive && (now - beatStartTime < BEAT_PULSE_MS)) {
-        // BEAT: schneller weisser Puls (150 ms)
-        uint32_t elapsed = now - beatStartTime;
+    else if (fx[E_BEAT].active && (now - fx[E_BEAT].startTime < BEAT_PULSE_MS)) {
+        uint32_t elapsed = now - fx[E_BEAT].startTime;
         uint8_t brightness;
         if (elapsed < BEAT_PULSE_MS / 2) {
             brightness = (uint8_t)((elapsed * 255) / (BEAT_PULSE_MS / 2));
@@ -400,67 +421,82 @@ void loop() {
         }
         fill_solid(leds, NUM_LEDS, CRGB::White);
         nscale8(leds, NUM_LEDS, brightness);
-        txData.mode = SYNC_MODE_BEAT;
-        txData.virusID = activeBeatID;
+        activeMode = SYNC_MODE_BEAT;
+        activeFxId = fx[E_BEAT].id;
     }
-    else if (zoneActive && (now - zoneStartTime < REMOTE_ZONE_MS)) {
-        // ZONE: RSSI-basierte Farbauswahl (Thresholds: -55, -75)
+    else if (fx[E_ZONE].active && (now - fx[E_ZONE].startTime < REMOTE_ZONE_MS)) {
         CRGB zoneColor;
-        if (smoothRSSI > -55) zoneColor = ZONE0_COLOR;
-        else if (smoothRSSI > -75) zoneColor = ZONE1_COLOR;
+        if (rssiSnapshot > -55) zoneColor = ZONE0_COLOR;
+        else if (rssiSnapshot > -75) zoneColor = ZONE1_COLOR;
         else zoneColor = ZONE2_COLOR;
         pulse = beatsin8(60, 150, 255, 0, heartBeatState);
         fill_solid(leds, NUM_LEDS, zoneColor);
         nscale8(leds, NUM_LEDS, pulse);
-        txData.mode = SYNC_MODE_ZONE;
-        txData.virusID = activeZoneID;
+        activeMode = SYNC_MODE_ZONE;
+        activeFxId = fx[E_ZONE].id;
     }
-    else if (ambientActive && (now - ambientStartTime < REMOTE_AMBIENT_MS)) {
-        // AMBIENT: Feste Farbe (RGB aus beatCounter encodet)
+    else if (fx[E_AMBIENT].active && (now - fx[E_AMBIENT].startTime < REMOTE_AMBIENT_MS)) {
         fill_solid(leds, NUM_LEDS, CRGB(ambientR, ambientG, ambientB));
-        txData.mode = SYNC_MODE_AMBIENT;
-        txData.virusID = activeAmbientID;
+        activeMode = SYNC_MODE_AMBIENT;
+        activeFxId = fx[E_AMBIENT].id;
     }
-    else if (strobeActive && (now - strobeStartTime < STROBE_DURATION_MS)) {
-        // STROBE: schnelle weisse Blitze (80 ms on/off, 2 s)
-        uint32_t elapsed = now - strobeStartTime;
+    else if (fx[E_STROBE].active && (now - fx[E_STROBE].startTime < STROBE_DURATION_MS)) {
+        uint32_t elapsed = now - fx[E_STROBE].startTime;
         if ((elapsed / STROBE_FLASH_MS) % 2 == 0) {
             fill_solid(leds, NUM_LEDS, CRGB::White);
         }
-        txData.mode = SYNC_MODE_STROBE;
-        txData.virusID = activeStrobeID;
+        activeMode = SYNC_MODE_STROBE;
+        activeFxId = fx[E_STROBE].id;
     }
     else if (uniquePeerCount + 1 >= 17) {
-        // THE SINGULARITY (≥17 Geräte total: du + sichtbare Peers)
+        // THE SINGULARITY
         hueOffset += 5;
         pulse = beatsin8(100, 150, 255, 0, heartBeatState);
         for (int i = 0; i < NUM_LEDS; i++) leds[i] = CHSV(hueOffset + (i*3), 255, pulse);
-        txData.mode = 0;
+        activeMode = 0;
     }
     else {
-        waveActive = false;
-        beatActive = false;
-        zoneActive = false;
-        ambientActive = false;
-        strobeActive = false;
-        // NORMAL / PRIME (Gesamtzahl = gefundene Peers + dieses Gerät)
+        // Effekte zurücksetzen (nur wenn keiner aktiv)
+        for (int i = 0; i < E_COUNT; i++) fx[i].active = false;
         uint8_t totalDevices = uniquePeerCount + 1;
-        bool prime = isPrime(totalDevices);
-        pulse = prime ? beatsin8(80, 120, 255, 0, heartBeatState) : beatsin8(35 + (power*55), 100, 255, 0, heartBeatState);
-
+        bool prime = isPrimeFast(totalDevices);
+        pulse = prime ? beatsin8(80, 120, 255, 0, heartBeatState)
+                      : beatsin8(35 + (uint8_t)(power*55), 100, 255, 0, heartBeatState);
         fill_solid(leds, NUM_LEDS, heartColor);
         nscale8(leds, NUM_LEDS, pulse);
-
         if (prime && random8() > 210) leds[random8(64)] = CRGB::White;
-        txData.mode = 0;
+        activeMode = 0;
     }
 
-    // Maske: Alles löschen, was nicht zum Herz gehört
+    // Maske: Bitmaske statt 2D-Array-Lookup
     for (int i = 0; i < 64; i++) {
-        if (heartMask[i / 8][i % 8] == 0) leds[i] = CRGB::Black;
+        if (!((heartMask64 >> i) & 1)) leds[i] = CRGB::Black;
     }
 
-    // 6. SENDEN
+    // 6. SENDEN (nicht-blockierend geplant für Wave-Rebroadcast)
+    if (waveReBroadcastDone && waveReBroadcastAt != 0 && now >= waveReBroadcastAt) {
+        txData.mode = SYNC_MODE_WAVE;
+        txData.virusID = fx[E_WAVE].id;
+        txData.magic_id = MAGIC_ID;
+        txData.beatCounter = heartBeatState;
+        txData.ver_major = FW_VERSION_MAJOR;
+        txData.ver_minor = FW_VERSION_MINOR;
+#if ENABLE_SERIAL_DEBUG
+        txData.ver_rel = FW_VERSION_PATCH;
+        txData.ver_dbg = FW_DEBUG_BUILD;
+#else
+        txData.ver_rel = FW_VERSION_PATCH;
+        txData.ver_dbg = 0;
+#endif
+        esp_err_t err = esp_now_send(broadcastMac, (uint8_t *)&txData, sizeof(txData));
+        if (err != ESP_OK) {
+            // Sendefehler ignorieren — nächster Frame sendet wieder
+        }
+        waveReBroadcastAt = 0;
+    }
+
+    txData.mode = activeMode;
+    txData.virusID = activeFxId;
     txData.magic_id = MAGIC_ID;
     txData.beatCounter = heartBeatState;
     txData.ver_major = FW_VERSION_MAJOR;
@@ -472,7 +508,8 @@ void loop() {
     txData.ver_rel = FW_VERSION_PATCH;
     txData.ver_dbg = 0;
 #endif
-    esp_now_send(broadcastMac, (uint8_t *) &txData, sizeof(txData));
+    esp_err_t sendErr = esp_now_send(broadcastMac, (uint8_t *) &txData, sizeof(txData));
+    (void)sendErr; // Fehler ignorieren, kein Retry in dieser Firmware
 
     // 7. OUTPUT
     FastLED.setBrightness(currentBright);
@@ -487,7 +524,7 @@ void loop() {
         int n = snprintf(line, sizeof(line),
                          "Status | FW %u.%u.%02u+debug | Peers: %d | RSSI: %.1f | Bright: %d | Morse: \"%s\" | remote",
                          FW_VERSION_MAJOR, FW_VERSION_MINOR, FW_DEBUG_BUILD,
-                         uniquePeerCount, smoothRSSI, currentBright, morseInput.c_str());
+                         uniquePeerCount, rssiSnapshot, currentBright, morseBuf);
         int listed = 0;
         for (int i = 0; i < MAX_PEERS && n < (int)sizeof(line) - 12 && listed < 10; i++) {
             if (seenPeers[i].lastSeen == 0) continue;
@@ -508,5 +545,11 @@ void loop() {
     }
 #endif
 
-    delay(20); // ~50 FPS
+    // 20 ms Frame-Limit, aber nicht blockierend für Watchdog
+    static uint32_t lastFrame = 0;
+    uint32_t frameTime = now - lastFrame;
+    if (frameTime < 20) {
+        delay(20 - frameTime);
+    }
+    lastFrame = millis();
 }

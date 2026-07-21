@@ -144,12 +144,22 @@ Vor dem Lauf: **seriellen Monitor beenden** (`Ctrl+C`), sonst ist der Port beleg
 ### Firmware-Version
 Im Sketch `Herz_Schwarm_CCC_V.ino` oben bei den `FW_*`-Defines.
 
-**Git-Stand:** Annotierter Tag **`v1.0.0`** auf `main` markiert diesen Stand. Die Basis **`1.0.0`** (`FW_VERSION_MAJOR/MINOR/PATCH`) bezeichnet den **Release-Stand** (ESP-NOW-Schwarm, Primzahl/Singularität, Morse-Virus, FastLED/Waveshare).
+**Git-Stand:** Annotierter Tag **`v1.1.0`** auf `main` markiert diesen Stand. Die Basis **`1.1.0`** (`FW_VERSION_MAJOR/MINOR/PATCH`) bezeichnet den **Release-Stand** (ESP-NOW-Schwarm, Primzahl/Singularität, Morse-Virus, FastLED/Waveshare).
 
 | Build | Anzeige (Beispiel) | Bedeutung |
 |--------|-------------------|-----------|
-| **Release** (`ENABLE_SERIAL_DEBUG=0`) | `1.0.0` | Nur `FW_VERSION_*`; kein Serial-Overhead. |
-| **Debug** (`ENABLE_SERIAL_DEBUG=1`) | `1.0.01+debug` | `FW_VERSION_MAJOR.MINOR` + **`FW_DEBUG_BUILD`** zweistellig (`01`…`99`) + Kennzeichnung `+debug`. |
+| **Release** (`ENABLE_SERIAL_DEBUG=0`) | `1.1.0` | Nur `FW_VERSION_*`; kein Serial-Overhead. |
+| **Debug** (`ENABLE_SERIAL_DEBUG=1`) | `1.1.01+debug` | `FW_VERSION_MAJOR.MINOR` + **`FW_DEBUG_BUILD`** zweistellig (`01`…`99`) + Kennzeichnung `+debug`. |
+
+**Änderungen v1.1.0 (Performance-Optimierung):**
+- `String` → `char[12]` für Morse-Puffer (kein Heap-Overhead)
+- Peer-Tracking: Hash-Index statt O(n²)-Scan
+- `isPrime()` → Lookup-Tabelle (O(1))
+- Herz-Maske: 64-bit Bitmaske statt 2D-Array
+- Wave-Rebroadcast: nicht-blockierend statt `delay()`
+- Frame-Limit: dynamisch statt festes `delay(20)`
+- Effekt-State: Array-basiert statt 24 Einzelvariablen
+- `smoothRSSI` als `volatile` für ISR-Sicherheit
 
 **Pflege:**
 - **`FW_VERSION_PATCH`** (und bei Bedarf MINOR/MAJOR) bei **Releases / Merge nach `main`** anheben (SemVer-üblich).

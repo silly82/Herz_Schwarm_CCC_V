@@ -3,6 +3,9 @@ build_debug/
 build_batch/
 build_basestation/
 
+# Backup-Dateien
+*.bak
+
 # Nerves / Elixir (herz_schwarm_nerves/)
 herz_schwarm_nerves/_build/
 herz_schwarm_nerves/deps/
