@@ -42,7 +42,24 @@ defmodule HerzSchwarm.Bridge do
 
   @impl true
   def init(_opts) do
-    port = Application.get_env(:herz_schwarm, :uart_device, "/dev/ttyUSB0")
+    # Fetch env WITHOUT fallback so we fail loud on misconfiguration.
+    # This prevents silent fallback to /dev/ttyUSB0 which doesn't exist on macOS.
+    port =
+      case Application.get_env(:herz_schwarm, :uart_device) do
+        nil ->
+          raise """
+          :herz_schwarm, :uart_device is not configured.
+          Set it in config/dev.exs (auto-detects cu.usbmodem* etc.)
+          or pass UART_DEVICE=/dev/cu.usbmodem101 env var to mix phx.server.
+          """
+
+        p when is_binary(p) ->
+          p
+
+        other ->
+          raise ":uart_device must be a binary path, got: #{inspect(other)}"
+      end
+
     state = %__MODULE__{
       uart_pid: nil,
       port: port,
