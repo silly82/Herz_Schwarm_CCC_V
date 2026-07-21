@@ -32,3 +32,12 @@ def test_dev_cu_glob_darwin():
     else:
         globs = _dev_cu_globs()
         assert globs == []
+
+
+def test_find_cli_returns_str_or_none():
+    from flashlib.ports import _find_cli
+    result = _find_cli()
+    assert result is None or isinstance(result, str)
+    if result:
+        import os
+        assert os.path.isfile(result)

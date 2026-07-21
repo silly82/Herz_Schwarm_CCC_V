@@ -4,10 +4,31 @@ from __future__ import annotations
 
 import glob
 import json
+import os
 import shutil
 import subprocess
 import sys
-from typing import List
+from typing import List, Optional
+
+# Known install paths when arduino-cli is not on PATH (e.g. macOS Arduino IDE bundle).
+_FALLBACK_CLI = [
+    "/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli",
+    "/usr/local/bin/arduino-cli",
+    "/opt/homebrew/bin/arduino-cli",
+    os.path.expanduser("~/Arduino/bin/arduino-cli"),
+    os.path.expanduser("~/.local/bin/arduino-cli"),
+]
+
+
+def _find_cli() -> Optional[str]:
+    """Locate arduino-cli. PATH first, then known install locations."""
+    p = shutil.which("arduino-cli")
+    if p:
+        return p
+    for path in _FALLBACK_CLI:
+        if os.path.isfile(path) and os.access(path, os.X_OK):
+            return path
+    return None
 
 
 def _matches_esp32s3(fqbn: str) -> bool:
@@ -36,7 +57,7 @@ def _dev_cu_globs() -> List[str]:
 
 def _discover_via_arduino_cli() -> List[str]:
     """Try `arduino-cli board list --format json`; return matching ports."""
-    cli = shutil.which("arduino-cli")
+    cli = _find_cli()
     if not cli:
         return []
     try:
