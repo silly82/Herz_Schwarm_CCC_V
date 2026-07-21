@@ -4,6 +4,9 @@ defmodule HerzSchwarm.Bridge do
 
   Sends newline-delimited JSON commands to the bridge firmware and
   parses incoming JSON responses. Broadcasts events via PubSub.
+
+  Reconnect strategy: exponential backoff capped at 30s, resets on success.
+  Without this, a missing bridge logs every 2s indefinitely.
   """
 
   use GenServer
@@ -13,10 +16,11 @@ defmodule HerzSchwarm.Bridge do
 
   @pubsub HerzSchwarm.PubSub
   @topic "bridge:events"
-  @reconnect_ms 2000
+  @reconnect_ms_initial 2_000
+  @reconnect_ms_max 30_000
   @uart_opts [speed: 115200, active: true, framing: {Circuits.UART.Framing.Line, separator: "\n"}]
 
-  defstruct [:uart_pid, :port, :connected, :seq, :buffer]
+  defstruct [:uart_pid, :port, :connected, :seq, :buffer, :reconnect_ms]
 
   # --- Public API ---
 
@@ -39,7 +43,14 @@ defmodule HerzSchwarm.Bridge do
   @impl true
   def init(_opts) do
     port = Application.get_env(:herz_schwarm, :uart_device, "/dev/ttyUSB0")
-    state = %__MODULE__{uart_pid: nil, port: port, connected: false, seq: 0, buffer: ""}
+    state = %__MODULE__{
+      uart_pid: nil,
+      port: port,
+      connected: false,
+      seq: 0,
+      buffer: "",
+      reconnect_ms: @reconnect_ms_initial
+    }
 
     if Application.get_env(:herz_schwarm, :bridge_enabled, true) do
       send(self(), :connect)
@@ -74,19 +85,20 @@ defmodule HerzSchwarm.Bridge do
         case UART.open(pid, state.port, @uart_opts) do
           :ok ->
             Logger.info("Bridge connected on #{state.port}")
+            # Reset backoff on successful connect
             broadcast({:bridge, :connected})
-            {:noreply, %{state | uart_pid: pid, connected: true}}
+            {:noreply, %{state | uart_pid: pid, connected: true, reconnect_ms: @reconnect_ms_initial}}
 
           {:error, reason} ->
             Logger.warning("Failed to open #{state.port}: #{inspect(reason)}")
             UART.stop(pid)
-            schedule_reconnect()
+            schedule_reconnect(state)
             {:noreply, %{state | connected: false}}
         end
 
       {:error, reason} ->
         Logger.warning("Failed to start UART: #{inspect(reason)}")
-        schedule_reconnect()
+        schedule_reconnect(state)
         {:noreply, %{state | connected: false}}
     end
   end
@@ -110,12 +122,20 @@ defmodule HerzSchwarm.Bridge do
   def handle_info({:circuits_uart, _port, :error, reason}, state) do
     Logger.warning("UART error: #{inspect(reason)}")
     broadcast({:bridge, :disconnected})
-    schedule_reconnect()
+    # Increase backoff after an error during operation
+    schedule_reconnect(%{state | reconnect_ms: next_backoff(state.reconnect_ms)})
     {:noreply, %{state | connected: false}}
   end
 
-  defp schedule_reconnect do
-    Process.send_after(self(), :connect, @reconnect_ms)
+  defp next_backoff(current) do
+    # 2s -> 4s -> 8s -> 16s -> 30s (cap)
+    min(current * 2, @reconnect_ms_max)
+  end
+
+  defp schedule_reconnect(state) do
+    delay = state.reconnect_ms
+    Process.send_after(self(), :connect, delay)
+    Logger.debug("Reconnect scheduled in #{delay}ms")
   end
 
   defp broadcast(msg) do

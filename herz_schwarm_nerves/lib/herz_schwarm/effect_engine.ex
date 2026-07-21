@@ -131,19 +131,35 @@ defmodule HerzSchwarm.EffectEngine do
   end
 
   def handle_cast({:set_bpm, 0}, state) do
-    if state.beat_timer, do: Process.cancel_timer(state.beat_timer)
-    state = %{state | bpm: 0, beat_active: false, beat_timer: nil}
+    state = cancel_beat_timer(state)
+    state = %{state | bpm: 0, beat_active: false}
     broadcast_state(state)
     {:noreply, state}
   end
 
   def handle_cast({:set_bpm, bpm}, state) do
-    if state.beat_timer, do: Process.cancel_timer(state.beat_timer)
+    state = cancel_beat_timer(state)
     interval_ms = div(60_000, bpm)
     timer = Process.send_after(self(), :beat_tick, interval_ms)
     state = %{state | bpm: bpm, beat_active: true, beat_timer: timer}
     broadcast_state(state)
     {:noreply, state}
+  end
+
+  # Cancel any pending beat_tick, draining any already-queued message.
+  # This avoids a race where :beat_tick fires after set_bpm(0) and re-arms.
+  defp cancel_beat_timer(state) do
+    case state.beat_timer do
+      nil -> state
+      ref ->
+        Process.cancel_timer(ref)
+        # Drain any :beat_tick already in the mailbox
+        receive do
+          :beat_tick -> :ok
+        after 0 -> :ok
+        end
+        %{state | beat_timer: nil}
+    end
   end
 
   def handle_cast(:tap_beat, state) do

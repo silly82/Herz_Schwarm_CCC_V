@@ -18,7 +18,7 @@ Ein Schwarm von 8x8 LED Herz-Badges auf Basis der **Waveshare ESP32-S3-Matrix**.
 - **Der Morse-Virus:** Morsese ein **«C»** (`- . - .`) über die BOOT-Taste, um einen weissen Blitz-Virus durch den gesamten Schwarm zu jagen.
 - **Die Welle (Basisstation):** Eine Welle breitet sich von der Basisstation aus: Badges in der Nähe leuchten zuerst, weiter entfernte später (RSSI-basierte Verzögerung, ~4 s Gesamtdauer). Badges leiten die Welle per ESP-NOW weiter.
 - **Fernauslösung (Basisstation):** Kompatibles `SyncPacket` mit `mode` **1** (Virus), **2** (Regenbogen / Singularity-Optik ~15 s), **3** (Primzahl-Party ~12 s), **4** (Welle / RSSI-Ripple ~4 s), **5** (Beat-Puls ~150 ms), **6** (RSSI-Zonen-Farben ~5 s), **7** (Ambient-Farbe ~30 s), **8** (Strobe ~2 s). Neue `virusID` pro Effekt verhindert Doppel-Trigger; während eines Effekts wird der passende `mode` weitergesendet (Kettenreaktion im Schwarm).
-- **Nerves-Controller (Raspberry Pi):** Optionale Elixir/Nerves-App (`herz_schwarm_nerves/`) steuert den Schwarm über einen USB-ESP32-Bridge (ESP-NOW). LiveView Web-UI für Effekt-Steuerung, Beat-Tap-Tempo, Ambient-Farbwahl. Koexistiert mit der Basisstation auf Kanal 13.
+- **Nerves-Controller (Raspberry Pi):** Optionale Elixir/Nerves-App (`herz_schwarm_nerves/`) steuert den Schwarm über einen USB-ESP32-Bridge (ESP-NOW). LiveView Web-UI für Effekt-Steuerung, Beat-Tap-Tempo, Ambient-Farbwahl. Koexistiert mit der Basisstation auf Kanal 13. **Dev-Start auf Mac** (ohne Nerves-Build): siehe `herz_schwarm_nerves/MAC_SETUP.md`.
 
 ### Spezifische Hardware-Hinweise (Waveshare ESP32-S3-Matrix)
 - **Pinout:** Die interne Matrix ist fest an **GPIO 14** verdrahtet. Die BOOT-Taste liegt auf **GPIO 0**.

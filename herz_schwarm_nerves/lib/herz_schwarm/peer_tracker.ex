@@ -53,13 +53,20 @@ defmodule HerzSchwarm.PeerTracker do
   end
 
   def handle_info({:bridge, :disconnected}, state) do
-    state = %{state | bridge_connected: false, peer_count: 0}
+    # Reset peer state on disconnect — peers are no longer reachable
+    state = %{state | bridge_connected: false, peer_count: 0, last_pong: nil}
     broadcast_status(state)
     {:noreply, state}
   end
 
   def handle_info({:bridge, %{"evt" => "pong"} = pong}, state) do
-    state = %{state | peer_count: pong["peers"] || 0, last_pong: pong}
+    # Fix: a pong implies the bridge is alive — also set bridge_connected
+    state = %{
+      state
+      | bridge_connected: true,
+        peer_count: pong["peers"] || 0,
+        last_pong: pong
+    }
     broadcast_status(state)
     {:noreply, state}
   end
