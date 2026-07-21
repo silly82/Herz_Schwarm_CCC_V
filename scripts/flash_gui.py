@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import os
 import sys
-import time
 from pathlib import Path
 
 # Add parent dir (scripts/) to path so flashlib is importable
@@ -20,10 +19,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from flashlib import __version__ as FLASHLIB_VERSION
 from flashlib.build import compile as do_compile
-from flashlib.build import upload as do_upload
+from flashlib.build import upload_capture as do_upload_capture
 from flashlib.firmware import read_firmware_string, read_firmware_version
 from flashlib.log import Log
-from flashlib.mac import read_mac
+from flashlib.mac import _parse_mac as parse_mac
 from flashlib.ports import discover_ports
 
 # Disable ANSI escapes if NO_COLOR is set or stdout is not a TTY
@@ -183,19 +182,18 @@ def action_flash(state: dict) -> None:
             log.append(_ts(), ver, port, "skip_no_device", "")
             continue
         print(C_GREY("  Upload…"))
-        ok = do_upload(port, FQBN, debug, BUILD_PATH, str(SKETCH_DIR), stream=True)
+        ok, output = do_upload_capture(port, FQBN, debug, BUILD_PATH, str(SKETCH_DIR))
         if not ok:
             print(C_RED("  ✗ Upload fehlgeschlagen"))
             log.append(_ts(), ver, port, "upload_failed", "")
             continue
-        print(C_GREY("  MAC lesen…"))
-        time.sleep(3.0)  # Bootloader-Reset abwarten, sonst ist Port noch busy
-        mac = read_mac(port)
+        # Extract MAC from the captured esptool output (printed during upload)
+        mac = parse_mac(output)
         if mac:
             print(C_GREEN(f"  ✓ OK — MAC {mac}"))
             log.append(_ts(), ver, port, "ok", mac)
         else:
-            print(C_YELLOW("  ⚠ Flash OK, MAC nicht lesbar"))
+            print(C_YELLOW("  ⚠ Flash OK, MAC nicht in Upload-Output"))
             log.append(_ts(), ver, port, "ok_mac_unread", "")
     print()
     print(C_GREEN(f"✓ Fertig. Log: {LOG_CSV.name}, {LOG_MD.name}"))

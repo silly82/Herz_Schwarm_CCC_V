@@ -76,7 +76,11 @@ def upload(
     sketch_dir: str,
     stream: bool = False,
 ) -> bool:
-    """Run `arduino-cli upload`. Returns True on success."""
+    """Run `arduino-cli upload`. Returns True on success.
+
+    Note: in stream mode, output is also written to the caller's terminal.
+    Use `upload_capture` if you need the combined output as a string.
+    """
     cli = _cli()
     if not cli:
         return False
@@ -84,3 +88,32 @@ def upload(
     if stream:
         return subprocess.run([cli] + argv).returncode == 0
     return subprocess.run([cli] + argv, capture_output=True).returncode == 0
+
+
+def upload_capture(
+    port: str,
+    fqbn: str,
+    debug: bool,
+    build_path: str,
+    sketch_dir: str,
+) -> tuple[bool, str]:
+    """Run `arduino-cli upload` and capture combined output (stdout+stderr).
+
+    Returns (success, output). Output is also echoed to the real terminal so
+    the user sees live progress (TTY behaviour).
+    """
+    cli = _cli()
+    if not cli:
+        return False, ""
+    argv = _upload_argv(port, fqbn, debug, build_path, sketch_dir)
+    res = subprocess.run(
+        [cli] + argv,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    output = res.stdout or ""
+    # Echo to the real terminal
+    sys.stdout.write(output)
+    sys.stdout.flush()
+    return res.returncode == 0, output

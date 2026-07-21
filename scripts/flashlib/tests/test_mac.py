@@ -25,3 +25,14 @@ def test_parse_mac_none():
 def test_parse_mac_with_prefix_text():
     out = "Chip type: ESP32-S3\nMAC: 12:34:56:78:9a:bc\nDone."
     assert _parse_mac(out) == "12:34:56:78:9a:bc"
+
+
+def test_parse_mac_write_flash_format():
+    # Real esptool write-flash output has the MAC in a column-aligned field
+    out = """esptool v5.2.0
+Connected to ESP32-S3 on /dev/cu.usbmodem1101:
+Chip type:          ESP32-S3 (QFN56) (revision v0.2)
+USB mode:           USB-Serial/JTAG
+MAC:                3c:0f:02:e4:61:00
+"""
+    assert _parse_mac(out) == "3c:0f:02:e4:61:00"

@@ -12,7 +12,12 @@ _MAC_RE = re.compile(r"(?:Base\s+)?MAC:\s*([0-9a-fA-F:]{17})")
 
 
 def _parse_mac(text: str) -> Optional[str]:
-    """Extract first MAC address from esptool output. Returns lowercase or None."""
+    """Extract first MAC address from esptool output. Returns lowercase or None.
+
+    Recognises two output shapes:
+      - "MAC: aa:bb:cc:dd:ee:ff"  (read_mac)
+      - "MAC:                aa:bb:cc:dd:ee:ff"  (write-flash)
+    """
     m = _MAC_RE.search(text)
     if not m:
         return None
