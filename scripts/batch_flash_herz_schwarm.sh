@@ -246,7 +246,7 @@ for port in "${PORTS[@]}"; do
     continue
   fi
   echo "Kurz warten, dann MAC lesen …"
-  sleep 1.5
+  sleep 3
   mac_read="$(read_mac "$port" || true)"
   ts_now="$(date '+%Y-%m-%d %H:%M:%S %z')"
   if [[ -n "${mac_read}" ]]; then

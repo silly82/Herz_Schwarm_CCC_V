@@ -189,7 +189,7 @@ def action_flash(state: dict) -> None:
             log.append(_ts(), ver, port, "upload_failed", "")
             continue
         print(C_GREY("  MAC lesen…"))
-        time.sleep(1.5)
+        time.sleep(3.0)  # Bootloader-Reset abwarten, sonst ist Port noch busy
         mac = read_mac(port)
         if mac:
             print(C_GREEN(f"  ✓ OK — MAC {mac}"))
