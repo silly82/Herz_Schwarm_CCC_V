@@ -53,6 +53,7 @@ A swarm of 8x8 LED heart badges based on the **Waveshare ESP32-S3-Matrix**. They
 - **Serial debug on USB (ESP32-S3):** enable **USB CDC On Boot** (`CDCOnBoot=cdc`) and `ENABLE_SERIAL_DEBUG=1`. Because `upload` has no `--build-property`, use `--build-path build_debug` on compile and `--input-dir build_debug` on upload — see the **Arduino CLI** subsection under *Setup & Configuration* for copy-paste commands.
 - **Live log:** `arduino-cli monitor -p <port> -c baudrate=115200` in an **interactive** terminal; stop with `Ctrl+C` before flashing again.
 - **Batch flash (several devices):** `scripts/batch_flash_herz_schwarm.sh` needs **esptool** on `PATH` in addition to arduino-cli. See *Batch-Update* under *Setup & Configuration* (German) for options and the log files `firmware_update_log.csv` / `firmware_update_log.md`.
+- **Interactive TUI (v0.1.0+):** running the same script in a terminal with `pyserial` installed auto-launches an ANSI menu (`scripts/flash_gui.py`) for port scanning, build mode (release/debug), compile, flash + MAC-read, and log view. TUI covers **flash operations only** — effect control (modes 1–8) stays on the base station via Web-UI (port 80) or MQTT. macOS + Linux supported; Windows in a later release.
 - **Morse logging:** with debug on, each symbol prints as `[Morse]`; after 800 ms without a new symbol the word is evaluated (`-.-.` triggers the virus, otherwise `ignoriert`). With debug off, none of this is compiled into `loop()`.
 - **Firmware version:** see *Firmware-Version* (German section under *Setup & Configuration*): `FW_*` in `Herz_Schwarm_CCC_V.ino`; release `MAJOR.MINOR.PATCH`, debug `MAJOR.MINOR.DD+debug` with `DD` 01–99.
 - **ESP-NOW:** firmware version is sent in each sync packet (17-byte `SyncPacket`); legacy13-byte peers still work — see *ESP-NOW Paket (Sync)* in the German section.
@@ -134,6 +135,39 @@ chmod +x scripts/batch_flash_herz_schwarm.sh
 | `--debug` | Entspricht **Serial-Debug**-Build: `CDCOnBoot=cdc` und `-DENABLE_SERIAL_DEBUG=1` (siehe oben) |
 
 Vor dem Lauf: **seriellen Monitor beenden** (`Ctrl+C`), sonst ist der Port belegt. Pro Gerät: zuerst Flash, danach MAC auslesen; Ergebnis `ok` / `upload_failed` / `ok_mac_unread` u. a. steht in der CSV/MD. Ausdrücklich mit **`bash ./scripts/...`** starten, falls die System-Shell zickt.
+
+### CLI Pseudo-GUI (interaktiv, ab v0.1.0)
+
+`scripts/batch_flash_herz_schwarm.sh` startet **automatisch** eine interaktive TUI, wenn ein TTY erkannt wird und `pyserial` installiert ist. Die TUI (`scripts/flash_gui.py`) ist ein dünner Wrapper um die gleiche Logik — nutzt aber ANSI-Boxen für Menü, Live-Output und Multi-Select.
+
+**Voraussetzung** (einmalig):
+```bash
+pip3 install --user pyserial
+```
+
+**Start:**
+```bash
+./scripts/batch_flash_herz_schwarm.sh       # TUI automatisch
+./scripts/batch_flash_herz_schwarm.sh --no-gui   # Bash-Modus erzwingen
+./scripts/batch_flash_herz_schwarm.sh --gui      # TUI erzwingen (Fehler wenn nicht möglich)
+python3 scripts/flash_gui.py               # TUI direkt starten
+```
+
+**Hauptmenü (6 Punkte):**
+| Taste | Funktion |
+|-------|----------|
+| `1` | ESP32-S3-Ports scannen + Multi-Select (`all` oder Komma-getrennte Nummern) |
+| `2` | Build-Modus: Release ↔ Debug toggle |
+| `3` | Firmware kompilieren (Live-Stream von arduino-cli) |
+| `4` | Flashen + MAC-Read pro Port, mit Progress `[2/5] /dev/cu.usbmodem…` |
+| `5` | Log anzeigen (letzte 20 Zeilen aus `firmware_update_log.md`) |
+| `q` | Beenden |
+
+**Geltungsbereich:** TUI ist **nur** für **Flash-Operationen** zuständig (Compile, Upload, MAC-Read, Log). Effekt-Steuerung (Modes 1–8, Virus/Regenbogen/Beat/Ambient/…) läuft weiterhin über die **Basisstation**: per **Web-UI** (Port 80) oder per **MQTT** (Broker konfiguriert in NVS). Der TUI-Flasher hat keinen ESP-NOW-Adapter und ist deshalb kein Effekt-Tool.
+
+**Plattformen:** macOS (primär, getestet), Linux (sekundär, gleicher Code). Windows: nicht in v0.1.0 (geplant v0.2.0).
+
+**Logs:** werden in die **gleichen Dateien** angehängt wie der Bash-Modus (`firmware_update_log.csv` / `firmware_update_log.md`) — keine Duplikation, vollständige Audit-Trail über alle Läufe und Tools.
 
 ### Serial-Debug & Morse-Logging
 - **Aktivierung:** Im Sketch `ENABLE_SERIAL_DEBUG` auf `1` setzen *oder* beim Kompilieren `-DENABLE_SERIAL_DEBUG=1` wie oben.
