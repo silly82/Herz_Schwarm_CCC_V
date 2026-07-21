@@ -163,6 +163,17 @@ def action_flash(state: dict) -> None:
     ver = read_firmware_string(str(INO_PATH), debug)
     log = Log(str(LOG_CSV), str(LOG_MD))
 
+    # Auto-Build wenn noch keine .bin in build_batch_gui/ vorhanden
+    bin_path = Path(BUILD_PATH) / f"{INO_PATH.stem}.ino.bin"
+    if not bin_path.exists():
+        print(C_YELLOW("⚠ Kein Build gefunden — kompiliere zuerst…"))
+        ok = do_compile(FQBN, debug, BUILD_PATH, str(SKETCH_DIR), stream=True)
+        if not ok:
+            print(C_RED("✗ Build fehlgeschlagen — Flash abgebrochen."))
+            pause()
+            return
+        print(C_GREEN("✓ Build OK"))
+
     print(C_CYAN(f"Flashen {len(ports)} Board(s) — {ver}"))
     for i, port in enumerate(ports, 1):
         print()
