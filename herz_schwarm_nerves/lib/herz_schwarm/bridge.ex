@@ -152,29 +152,44 @@ defmodule HerzSchwarm.Bridge do
   end
 
   # Fallback UART-Device resolution: checks UART_DEVICE env-var first,
-  # then does Path.wildcard on common macOS USB-serial patterns, then
-  # falls back to /dev/ttyUSB0 (Linux) or COM3 (Windows).
+  # then does Path.wildcard on common macOS USB-serial patterns. On
+  # Linux, defaults to /dev/ttyUSB0 (typical for CH340/CP2102). On
+  # macOS, returns nil if no device found (caller raises loud).
   defp resolve_uart_device do
     case System.get_env("UART_DEVICE") do
       nil ->
         cond do
-          match?({:win32, _}, :os.type()) -> "COM3"
+          match?({:win32, _}, :os.type()) ->
+            "COM3"
+
+          match?({:unix, :darwin}, :os.type()) ->
+            # macOS: only return a port we actually found, never a Linux path
+            first_found([
+              "/dev/cu.usbserial-*",
+              "/dev/cu.SLAB_USBtoUART",
+              "/dev/cu.usbmodem*"
+            ])
+
           true ->
-            case Path.wildcard("/dev/cu.usbserial-*") do
-              [first | _] -> first
-              [] ->
-                case Path.wildcard("/dev/cu.SLAB_USBtoUART") do
-                  [first | _] -> first
-                  [] ->
-                    case Path.wildcard("/dev/cu.usbmodem*") do
-                      [first | _] -> first
-                      [] -> "/dev/ttyUSB0"
-                    end
-                end
-            end
+            # Linux: default to ttyUSB0 (CH340/CP2102 USB-serial bridges)
+            first_found([
+              "/dev/ttyUSB*",
+              "/dev/ttyACM*"
+            ]) || "/dev/ttyUSB0"
         end
-      dev -> dev
+
+      dev ->
+        dev
     end
+  end
+
+  defp first_found(patterns) do
+    Enum.find_value(patterns, fn pattern ->
+      case Path.wildcard(pattern) do
+        [first | _] -> first
+        _ -> nil
+      end
+    end)
   end
 
   defp next_backoff(current) do
