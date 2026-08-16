@@ -38,9 +38,9 @@
 #define MAX_PEERS            32
 #define SYNC_PACKET_LEGACY_LEN 13
 
-#define STATION_FW_MAJOR 0
-#define STATION_FW_MINOR     1
-#define STATION_FW_PATCH     7
+#define BASESTATION_FW_MAJOR 0
+#define BASESTATION_FW_MINOR     1
+#define BASESTATION_FW_PATCH     7
 
 #define MQTT_NS "hs_mqtt"
 #define MQTT_HOST_DEF    "192.168.1.10"
@@ -591,7 +591,7 @@ static void handleApiPeersTable() {
     char json[3072];
     size_t o = 0;
     o += snprintf(json + o, sizeof(json) - o, "{\"station\":\"%u.%u.%u\",\"n\":%d,\"peers\":[",
-                  STATION_FW_MAJOR, STATION_FW_MINOR, STATION_FW_PATCH, countActivePeers(now));
+                  BASESTATION_FW_MAJOR, BASESTATION_FW_MINOR, BASESTATION_FW_PATCH, countActivePeers(now));
 
     bool first = true;
     portENTER_CRITICAL(&peerMux);
@@ -632,9 +632,9 @@ static void sendEffectBroadcast(uint8_t mode) {
     pkt.beatCounter = (uint32_t)millis();
     pkt.virusID = (uint32_t)esp_random();
     pkt.mode = mode;
-    pkt.ver_major = STATION_FW_MAJOR;
-    pkt.ver_minor = STATION_FW_MINOR;
-    pkt.ver_rel = STATION_FW_PATCH;
+    pkt.ver_major = BASESTATION_FW_MAJOR;
+    pkt.ver_minor = BASESTATION_FW_MINOR;
+    pkt.ver_rel = BASESTATION_FW_PATCH;
     pkt.ver_dbg = 0;
     if (esp_now_send(broadcastMac, (uint8_t *)&pkt, sizeof(pkt)) != ESP_OK) {
         Serial.println("esp_now_send effect failed");
@@ -646,7 +646,7 @@ static void sendEffectBroadcast(uint8_t mode) {
 void setup() {
     Serial.begin(115200);
     delay(300);
-    Serial.printf("Herz-Schwarm Basisstation FW %u.%u.%u\n", STATION_FW_MAJOR, STATION_FW_MINOR, STATION_FW_PATCH);
+    Serial.printf("Herz-Schwarm Basisstation FW %u.%u.%u\n", BASESTATION_FW_MAJOR, BASESTATION_FW_MINOR, BASESTATION_FW_PATCH);
 
     loadMqttConfig();
     mqtt.setCallback(mqttCallback);

@@ -341,9 +341,9 @@ ioreg -p IOUSB -l | grep -i "usb serial\|usb-serial"
 ## Wichtige Constraints
 
 - **macOS first** (GallifreyM1), Linux secondary (x86_64)
-- **Windows**: nicht in v0.1.0 (geplant v0.2.0)
+- **Windows**: nicht in flashlib v0.1.0 (geplant v0.2.0 — eigener Versions-Track des Flash-Tools, siehe unten)
 - **Effekt-Steuerung läuft NUR über diese Web-UI** (oder Basisstation), nie im TUI-Flasher
-- **Single-source-of-truth für Version**: `Herz_Schwarm_CCC_V.ino` Defines → gelesen von allen Tools
+- **Version**: `Herz_Schwarm_CCC_V.ino` Defines sind nur für die Badge-FW + den `vA.B.C.D`-Git-Tag maßgeblich. Basisstation/Bridge/Nerves-App/flashlib versionieren sich unabhängig — vollständige Tabelle in `../README.md` (Abschnitt "Versionen aller Module")
 - **Logs append-only**: `firmware_update_log.csv`/`.md` werden nie überschrieben
 
 ## Coexistenz mit der ESP32-S3+W5500-Basisstation

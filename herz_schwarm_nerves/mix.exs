@@ -59,7 +59,6 @@ defmodule HerzSchwarm.MixProject do
       {:esbuild, "~> 0.8", runtime: Mix.env() == :dev},
       {:tailwind, "~> 0.2", runtime: Mix.env() == :dev},
       {:jason, "~> 1.4"},
-      {:plug_cowboy, "~> 2.6"},
       {:telemetry_poller, "~> 1.0"},
       {:heroicons,
        github: "tailwindlabs/heroicons",

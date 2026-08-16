@@ -234,6 +234,20 @@ scripts/version.sh tag            # annotierten Tag setzen
 - **`FW_DEBUG_BUILD`** nur auf dem **Debug-Zweig** bei jedem **sichtbaren neuen Debug-Stand** um 1 erhöhen, **höchstens 99**. Bei Überlauf: MINOR anheben und Debug-Zähler wieder bei `01` starten (oder neue Basis-Version festlegen — im Team einheitlich halten).
 - Nach größeren Änderungen: Kurzkommentar im Sketch neben den `FW_*`-Zeilen aktualisieren.
 
+### Versionen aller Module
+
+Das A.B.C.D-Schema oben beschreibt **nur die Badge-Firmware** (`Herz_Schwarm_CCC_V.ino`) — sie treibt auch den repo-weiten `vA.B.C.D`-Git-Tag. Die anderen vier Artefakte im Monorepo versionieren sich **unabhängig**, mit je eigenem `MAJOR.MINOR.PATCH`:
+
+| Modul | Datei | Define/Feld | Aktuell |
+|-------|-------|-------------|---------|
+| Badge (Schwarm) | `Herz_Schwarm_CCC_V.ino` | `FW_VERSION_MAJOR/MINOR/PATCH` | 1.2.0 |
+| Basisstation | `Herz_Schwarm_BaseStation/Herz_Schwarm_BaseStation.ino` | `BASESTATION_FW_MAJOR/MINOR/PATCH` | 0.1.7 |
+| Bridge (Nerves-Adapter) | `herz_schwarm_nerves/firmware/esp32_bridge/esp32_bridge.ino` | `BRIDGE_FW_MAJOR/MINOR/PATCH` | 0.1.2 |
+| Nerves/Phoenix-App | `herz_schwarm_nerves/mix.exs` | `@version` | 0.1.1 |
+| Flash-Tooling (Python) | `scripts/flashlib/__init__.py` | `__version__` | 0.1.0 |
+
+Jedes Modul wird unabhängig gebaut, geflasht bzw. deployed — eine einzige globale Versionsnummer für alles ist bewusst nicht das Ziel. `scripts/version.sh all` zeigt den aktuellen Stand aller fünf; `scripts/version.sh tag` schreibt sie als Snapshot in die Tag-Message des `vA.B.C.D`-Releases (D bleibt reiner Git-Commit-Zähler seit dem letzten `vA.B.C`-Tag, repo-weit — nicht auf Badge-Änderungen beschränkt).
+
 ### ESP-NOW Paket (Sync)
 Kompaktes `SyncPacket` (packed): `magic_id`, `beatCounter`, `virusID`, `mode` wie bisher, plus **vier Byte** `ver_major`, `ver_minor`, `ver_rel`, `ver_dbg` (gesamt **17 Byte**). **Ältere Firmware** sendet nur **13 Byte** — wird weiter erkannt; die Version des Peers bleibt dann unbekannt (`?` im Debug-Log), bis ein Paket mit voller Länge ankommt. Zusätzliche Kosten: etwas größeres Payload pro Sendezyklus (weiterhin ein `esp_now_send` pro Frame), wenig RAM pro Peer für die gespeicherte Version.
 
@@ -245,7 +259,7 @@ Kompaktes `SyncPacket` (packed): `magic_id`, `beatCounter`, `virusID`, `mode` wi
 
 1. **Badge-Sketch:** `Herz_Schwarm_CCC_V.ino` (Repo-Wurzel), Ziel-Hardware **Waveshare ESP32-S3-Matrix**, **FQBN** `esp32:esp32:esp32s3`, Kanal **13**, `MAGIC_ID` wie im Sketch.
 2. **Basisstation-Sketch:** Ordner `Herz_Schwarm_BaseStation/`, Datei `Herz_Schwarm_BaseStation.ino`, **FQBN** `esp32:esp32:esp32s3`; Ethernet **W5500** (Referenz-Pins Spotpear: SCK 13, MISO 12, MOSI 11, CS 14, RST 9, INT 10).
-3. **Firmware-Version Basisstation:** `STATION_FW_MAJOR/MINOR/PATCH` im Basisstation-Sketch; in der Web-UI und in JSON (`/api/peers` → `station`) sichtbar.
+3. **Firmware-Version Basisstation:** `BASESTATION_FW_MAJOR/MINOR/PATCH` im Basisstation-Sketch; in der Web-UI und in JSON (`/api/peers` → `station`) sichtbar (JSON-Key `station` ist ein fester String, unabhängig vom Define-Namen).
 4. **Web-UI Basisstation:** HTTP Port **80** nach Ethernet-IP (`/`): Peers-Tabelle (Polling), Eastereggs (Virus / Regenbogen / Primzahl-Party / Welle), **MQTT-Konfiguration** (Formular).
 5. **REST-API Basisstation:** `GET /api/peers` (JSON: Station-Version, Peer-Liste mit MAC, RSSI, Firmware-String, Alter); `POST /api/effect?m=1|2|3|4`; `POST /api/virus` (Alias für `m=1`); `GET /api/mqtt` (Konfiguration **ohne** Passwort, mit `has_password` und `connected`); `POST /api/mqtt` (Form-URL-encoded: `en`, `host`, `port`, `user`, optional `pass`, `ts`, `tc` — leeres Passwort = unverändert). Modi 5–8 werden nur vom Nerves-Controller gesendet (direkt via ESP-NOW-Bridge).
 6. **MQTT:** **Klartext-TCP** (typisch Port **1883**), **kein TLS**. Einstellungen in **NVS** (`Preferences`, Namespace `hs_mqtt`); Broker per **Hostname oder IP** (`Network.hostByName`). Topics konfigurierbar: Status (Publish, JSON wie Peers-Kurzform), Befehl (Subscribe → löst Virus/Effekt `m=1` aus).

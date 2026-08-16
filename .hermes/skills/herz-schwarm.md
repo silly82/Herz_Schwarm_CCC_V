@@ -24,9 +24,10 @@ W5500), Nerves-Controller (Elixir/Phoenix), TUI-Flasher (Python).
 cd /Users/silvanwalker/Documents/Arduino/Herz_Schwarm_CCC_V
 
 # Versionsschema A.B.C.D siehe unten
-./scripts/version.sh current          # aktuelle A.B.C aus .ino
+./scripts/version.sh current          # aktuelle A.B.C aus .ino (Badge)
+./scripts/version.sh all              # Versionen aller 5 Module
 ./scripts/version.sh next-tag         # naechster Git-Tag (D = Commits)
-./scripts/version.sh tag              # annotierten Tag setzen
+./scripts/version.sh tag              # annotierten Tag setzen (inkl. Modul-Snapshot)
 
 # TUI-Flasher (effekt-Steuerung laeuft NICHT hier, nur ueber Basisstation)
 python3 scripts/flash_gui.py
@@ -52,7 +53,29 @@ arduino-cli compile --fqbn esp32:esp32:esp32s3:CDCOnBoot=cdc --build-path build_
 **D ist NICHT im Code** — würde Neukompilation bei jedem Commit erfordern.
 Tag-Format: `vA.B.C.D` (`scripts/version.sh` rechnet D automatisch).
 
+**Achtung:** `D` zählt *alle* Commits im Monorepo seit dem letzten `vA.B.C`-Tag,
+nicht nur Änderungen an der Badge-`.ino`. Ein Tag wie `v1.2.0.7` heisst nicht
+zwingend "7. Build der Badge-FW 1.2.0" — es kann auch reine Nerves-/Bridge-Arbeit
+sein, ohne dass sich die Badge-FW seit `v1.2.0.0` geändert hat. Der annotierte
+Tag-Body listet deshalb seit `version.sh tag`-Erweiterung alle 5 Modul-Versionen
+als Snapshot (`scripts/version.sh all`), nicht nur A.B.C der Badge-FW.
+
 **SyncPacket hat nur 17 Byte** — überträgt nur A.B.C + DEBUG_BUILD-Flag, kein D.
+
+## Versionen aller Module (Stand: siehe `scripts/version.sh all`)
+
+| Modul | Datei | Define/Feld | Eigenständig? |
+|-------|-------|-------------|----------------|
+| Badge | `Herz_Schwarm_CCC_V.ino` | `FW_VERSION_MAJOR/MINOR/PATCH` | treibt `vA.B.C.D`-Git-Tags |
+| Basisstation | `Herz_Schwarm_BaseStation/Herz_Schwarm_BaseStation.ino` | `BASESTATION_FW_MAJOR/MINOR/PATCH` | eigener Zähler |
+| Bridge | `herz_schwarm_nerves/firmware/esp32_bridge/esp32_bridge.ino` | `BRIDGE_FW_MAJOR/MINOR/PATCH` | eigener Zähler |
+| Nerves-App | `herz_schwarm_nerves/mix.exs` | `@version` | eigener Zähler |
+| Flash-Tooling | `scripts/flashlib/__init__.py` | `__version__` | eigener Zähler, eigene Git-Tags `v0.1.x` |
+
+Jedes Modul wird unabhängig gebaut/geflasht/deployed und hat einen eigenen
+Release-Rhythmus — eine einzelne globale Versionsnummer für alles ist bewusst
+nicht das Ziel. Der `vA.B.C.D`-Git-Tag bleibt der Repo-weite Release-Marker,
+dokumentiert aber jetzt per Tag-Message den Stand aller 5 Module.
 
 ## Repo-Layout
 
@@ -73,7 +96,7 @@ scripts/
   │   ├─ mac.py                     # MAC-Parser (write-flash + read_mac)
   │   ├─ log.py                     # CSV + MD Append-only Logger
   │   └─ firmware.py                # A.B.C aus .ino parsen
-  └─ version.sh                     # A.B.C.D Versions-Helper
+  └─ version.sh                     # A.B.C.D Versions-Helper + Cross-Modul-Snapshot (`all`)
 firmware_update_log.csv / .md       # Flash-Audit-Trail (alle Tools, append-only)
 build_basestation/ build_debug/     # Build-Artefakte (gitignored)
 build_batch_gui/                    # TUI-Build-Cache (gitignored)
@@ -118,8 +141,8 @@ ESP32 als USB-Serial-JSON-Bridge.
 - **Auto-Detect UART** auf Mac: `Path.wildcard` auf cu.usbserial-*, cu.SLAB_USBtoUART, cu.usbmodem* (XIAO C6)
 - **Reconnect-Backoff** exponential (2s→4s→…→30s) — verhindert Log-Spam bei fehlender Hardware
 - **Nerves-Production-Build** (Raspberry Pi 4) ist optional — der Mac als Dev-Host reicht
-- **Bekannter Bug v1.2.0.3**: `Application.get_env` in `bridge.ex:45` fällt auf hardcoded `/dev/ttyUSB0` Default zurück, Auto-Detect wird ignoriert. Workaround: `UART_DEVICE=/dev/cu.usbmodem101 mix phx.server`. Echter Fix: `Application.fetch_env!` statt `get_env`
-- **Bekannter Bug v1.2.0.3**: `plug_cowboy 2.9.0` crasht sporadisch mit `UndefinedFunctionError: Plug.Cowboy.Translator.translate/4` (nicht mit OTP 28 kompatibel). Workaround: `{:plug_cowboy, "~> 2.6"}` aus `mix.exs` entfernen (Bandit wird bereits genutzt)
+- **Gefixt (v1.2.0.5-v1.2.0.7)**: `/dev/ttyUSB0`-Hardcode-Fallback in `bridge.ex` — jetzt `Path.wildcard`-Auto-Detect + fail-loud statt silent fallback
+- **Gefixt**: `plug_cowboy` aus `mix.exs` entfernt (war totes Dependency, Bandit ist der aktive Adapter — `config/config.exs` `adapter: Bandit.PhoenixAdapter`)
 
 ## Known Issues / Pitfalls
 
@@ -150,7 +173,8 @@ sind Build-Caches → **alle in `.gitignore`**. `firmware_update_log.{csv,md}` w
 
 ```bash
 # Version
-scripts/version.sh current         # A.B.C
+scripts/version.sh current         # A.B.C (Badge)
+scripts/version.sh all             # Versionen aller 5 Module
 scripts/version.sh next-tag        # vA.B.C.D-Vorschlag
 scripts/version.sh tag             # Tag setzen + pushen
 
@@ -194,7 +218,7 @@ tail -5 firmware_update_log.csv
 - **macOS first** (GallifreyM1, arm64), Linux secondary (x86_64)
 - **Windows**: v0.2.0 (COM-Ports, VT-Mode aktivieren)
 - **Effekt-Steuerung läuft NUR über Basisstation** (Web-UI / MQTT), nie im TUI
-- **Single-source-of-truth für Version**: `Herz_Schwarm_CCC_V.ino` Defines → gelesen von allen Tools
+- **Fünf unabhängige Versions-Namensräume** (kein einzelnes Single-source-of-truth mehr): Badge (`FW_VERSION_*`, treibt `vA.B.C.D`-Tags), Basisstation (`BASESTATION_FW_*`), Bridge (`BRIDGE_FW_*`), Nerves (`mix.exs` `@version`), flashlib (`__version__`) — siehe Tabelle in README "Versionen aller Module"
 - **Logs append-only**: nie `firmware_update_log.csv` überschreiben
 
 ## Wann NICHT weiterarbeiten
