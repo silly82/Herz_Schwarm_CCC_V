@@ -50,6 +50,7 @@ defmodule HerzSchwarmWeb.DashboardLive do
           <span class={"badge #{if @active_mode > 0, do: "badge-active", else: "badge-idle"}"}>
             {@mode_name}
           </span>
+          <a href="/flash" class="badge badge-info">&#x26A1; Flash-Station</a>
         </div>
       </header>
 

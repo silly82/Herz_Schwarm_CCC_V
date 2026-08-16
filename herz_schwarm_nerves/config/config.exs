@@ -33,6 +33,12 @@ config :tailwind,
 
 config :logger, backends: [:console]
 
+# FlashStation/FirmwareSync: wo geflashte Firmware-Assets liegen und woher
+# sie per GitHub-Release-Sync geholt werden. firmware_dir wird in target.exs
+# auf die persistente Nerves-Partition umgebogen.
+config :herz_schwarm, :firmware_dir, Path.expand("../tmp/firmware", __DIR__)
+config :herz_schwarm, :firmware_github_repo, "silly82/Herz_Schwarm_CCC_V"
+
 # UART-Device wird in dev.exs gesetzt, ABER Application.start/2 läuft vor
 # der import_config-Resolution, sodass uart_device zur Bridge-Init-Zeit leer
 # sein kann. Wir setzen hier einen hartcodierten Default, der ueberschrieben

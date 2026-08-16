@@ -11,6 +11,8 @@ defmodule HerzSchwarm.Application do
         HerzSchwarm.Bridge,
         HerzSchwarm.EffectEngine,
         HerzSchwarm.PeerTracker,
+        HerzSchwarm.FlashStation,
+        HerzSchwarm.FirmwareSync,
         HerzSchwarmWeb.Telemetry,
         HerzSchwarmWeb.Endpoint
       ]

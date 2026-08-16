@@ -14,3 +14,6 @@ config :nerves_network, :ifname,
 # For native USB-CDC on ESP32-S3, use ttyACM0.
 config :herz_schwarm, :uart_device, "/dev/ttyUSB0"
 config :herz_schwarm, bridge_enabled: true
+
+# Persistente Nerves-Partition (uebersteht Reboots) statt tmp/
+config :herz_schwarm, :firmware_dir, "/root/firmware"
