@@ -18,6 +18,7 @@ defmodule HerzSchwarm.Bridge do
   @topic "bridge:events"
   @reconnect_ms_initial 2_000
   @reconnect_ms_max 30_000
+  @poll_status_ms 5_000
   @uart_opts [speed: 115200, active: true, framing: {Circuits.UART.Framing.Line, separator: "\n"}]
 
   defstruct [:uart_pid, :port, :connected, :seq, :buffer, :reconnect_ms]
@@ -96,6 +97,7 @@ defmodule HerzSchwarm.Bridge do
             Logger.info("Bridge connected on #{state.port}")
             # Reset backoff on successful connect
             broadcast({:bridge, :connected})
+            Process.send_after(self(), :poll_status, @poll_status_ms)
             {:noreply, %{state | uart_pid: pid, connected: true, reconnect_ms: @reconnect_ms_initial}}
 
           {:error, reason} ->
@@ -109,6 +111,20 @@ defmodule HerzSchwarm.Bridge do
         Logger.warning("Failed to start UART: #{inspect(reason)}")
         schedule_reconnect(state)
         {:noreply, %{state | connected: false}}
+    end
+  end
+
+  @impl true
+  def handle_info(:poll_status, state) do
+    if state.connected do
+      seq = state.seq + 1
+      json = Jason.encode!(%{cmd: "status", seq: seq}) <> "\n"
+      UART.write(state.uart_pid, json)
+      Process.send_after(self(), :poll_status, @poll_status_ms)
+      {:noreply, %{state | seq: seq}}
+    else
+      # Not connected: drop the poll loop here, :connect restarts it on success
+      {:noreply, state}
     end
   end
 

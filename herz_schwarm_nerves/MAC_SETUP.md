@@ -360,6 +360,20 @@ ioreg -p IOUSB -l | grep -i "usb serial\|usb-serial"
 
 **Wenn Probleme:** Eine Station deaktivieren (z. B. Web-UI der ESP32-S3-Basisstation nicht benutzen, nur Nerves verwenden, oder umgekehrt).
 
+## Ack/Retry-Mechanismus der Nerves-Bridge (ab Bridge-FW v0.1.2)
+
+Nur der Nerves-Pfad (Modus 3: Matrix + Basisstation + Nerves) hat zuverlässige Zustellung. Modus 2 (Basisstation allein) bleibt bewusst fire-and-forget — dort existiert kein Ack.
+
+**Ablauf:**
+1. Bridge broadcastet ein `SyncPacket` (wie bisher).
+2. Jede Station, die es empfängt, sendet ein `AckPacket` (magic_id + virusID) per ESP-NOW-Unicast an die Absender-MAC zurück.
+3. Haben nicht alle zuletzt aktiven (< 30s) Stationen innerhalb von 150ms geantwortet, broadcastet die Bridge das gleiche Paket erneut — max. 2 Retries (3 Sends insgesamt).
+4. Stationen ohne Lebenszeichen seit 30s gelten als offline und blockieren keine Retries mehr.
+
+**Peer-Count:** `{"evt":"pong","peers":N,...}` liefert jetzt die echte Anzahl zuletzt aktiver Stationen (vorher immer `0`, das Feld wurde nie gesetzt). Der Pi pollt `{"cmd":"status"}` alle 5s automatisch (`HerzSchwarm.Bridge`), das Dashboard zeigt den Wert live über `PeerTracker`.
+
+**Für die Stations-Firmware** (separates Repo, nicht hier): nach Empfang eines validen `SyncPacket` ein `AckPacket{magic_id: 0x421337CC, virusID: <empfangene virusID>}` per `esp_now_send()` unicast an die Absender-MAC zurücksenden. Die Bridge-MAC muss dafür einmalig als ESP-NOW-Peer registriert werden (unverschlüsselt, Kanal 13).
+
 ## Production-Build (für Raspberry Pi 4)
 
 ```bash
