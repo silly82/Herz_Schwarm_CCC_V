@@ -1,4 +1,5 @@
 @import "tailwindcss";
+@source "../../lib/herz_schwarm_web";
 
 :root {
   --pink: #ff4d8a;

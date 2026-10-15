@@ -372,6 +372,12 @@ Nur der Nerves-Pfad (Modus 3: Matrix + Basisstation + Nerves) hat zuverlässige 
 
 **Bis v0.1.2** wartete die Bridge ausschließlich auf `AckPacket`s — die Badge-Firmware sendet aber keine, daher blieb `peers` immer `0` und Retries wurden nie ausgelöst.
 
+**Peer-Liste & Badge finden (Bridge ≥ 0.2.0):** `{"cmd":"peers"}` → je aktiver Station eine Zeile
+`{"evt":"peer","mac":"A0:F2:62:EC:3B:B4","rssi":-74,"fw":"1.3.0","age":40}`, danach `{"evt":"peers","n":N}`.
+`{"cmd":"identify","mac":"A0:F2:62:EC:3B:B4"}` sendet Modus 9 (SyncPacket + 6 Byte Ziel-MAC, 3×) — nur dieses
+Badge blinkt 10 s grün (Badge-FW ≥ 1.3.0), Antwort `ack`. Der Pi pollt `peers` zusammen mit `status`;
+das Dashboard zeigt die Liste mit „🔎 Finden“-Button (`HerzSchwarm.PeerTracker.identify/1`).
+
 **Peer-Count:** `{"evt":"pong","peers":N,...}` liefert jetzt die echte Anzahl zuletzt aktiver Stationen (vorher immer `0`, das Feld wurde nie gesetzt). Der Pi pollt `{"cmd":"status"}` alle 5s automatisch (`HerzSchwarm.Bridge`), das Dashboard zeigt den Wert live über `PeerTracker`.
 
 **Für Stations-Firmware ohne eigenen SyncPacket-Broadcast** (separates Repo, nicht hier): nach Empfang eines validen `SyncPacket` ein `AckPacket{magic_id: 0x421337CC, virusID: <empfangene virusID>}` per `esp_now_send()` unicast an die Absender-MAC zurücksenden. Die Bridge-MAC muss dafür einmalig als ESP-NOW-Peer registriert werden (unverschlüsselt, Kanal 13).
@@ -451,7 +457,11 @@ Behoben in 0.1.2: Bridge-Port-Default `/dev/ttyUSB0` / falscher `usbmodem*`-Port
 Plug.Cowboy-Translator-Crash (Config wurde nicht geladen, jetzt Bandit), Abziehen der Bridge wurde nicht
 erkannt (falsches `circuits_uart`-Nachrichtenformat).
 
-1. **phoenix_live_view 0.20.x** hat ein Advisory (EEF-CVE-2026-64941, LOW, Open Redirect) — Fix erst in 1.x,
-   Upgrade braucht Phoenix 1.8 / phoenix_html 4 (größerer Umbau).
+Ebenfalls 0.1.2: Upgrade auf Phoenix 1.8 / LiveView 1.2 / phoenix_html 4 — die Templates nutzen
+`{…}`-Interpolation, die LiveView 0.20 nicht kannte (UI zeigte `{@inner_content}` wörtlich). CSS jetzt
+Tailwind 4 (`@import "tailwindcss"`, keine `tailwind.config.js`).
+
+1. **Tailwind-4-Binary auf macOS** wird mit Exit 137 beendet (ungültige Ad-hoc-Signatur):
+   `codesign --force --sign - _build/tailwind-macos-arm64-*` und `mix assets.build` erneut.
 2. **C6 USB-Cable-Reset**: Port-File bleibt erhalten, aber USB-Bus verschwindet
    - **Workaround**: USB-Hub mit eigener Stromversorgung verwenden

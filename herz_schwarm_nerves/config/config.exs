@@ -23,11 +23,11 @@ config :esbuild,
     env: %{"NODE_PATH" => Path.expand("../deps", __DIR__)}
   ]
 
+# Tailwind v4: app.css nutzt @import "tailwindcss" + @source (keine tailwind.config.js mehr).
 config :tailwind,
-  version: "3.4.0",
+  version: "4.3.0",
   herz_schwarm: [
     args: ~w(
-      --config=tailwind.config.js
       --input=css/app.css
       --output=../priv/static/assets/app.css
     ),

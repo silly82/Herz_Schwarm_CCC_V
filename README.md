@@ -242,7 +242,7 @@ Das A.B.C.D-Schema oben beschreibt **nur die Badge-Firmware** (`Herz_Schwarm_CCC
 |-------|-------|-------------|---------|
 | Badge (Schwarm) | `Herz_Schwarm_CCC_V.ino` | `FW_VERSION_MAJOR/MINOR/PATCH` | 1.3.0 |
 | Basisstation | `Herz_Schwarm_BaseStation/Herz_Schwarm_BaseStation.ino` | `BASESTATION_FW_MAJOR/MINOR/PATCH` | 0.3.0 |
-| Bridge (Nerves-Adapter) | `herz_schwarm_nerves/firmware/esp32_bridge/esp32_bridge.ino` | `BRIDGE_FW_MAJOR/MINOR/PATCH` | 0.1.6 |
+| Bridge (Nerves-Adapter) | `herz_schwarm_nerves/firmware/esp32_bridge/esp32_bridge.ino` | `BRIDGE_FW_MAJOR/MINOR/PATCH` | 0.2.0 |
 | Nerves/Phoenix-App | `herz_schwarm_nerves/mix.exs` | `@version` | 0.1.2 |
 | Flash-Tooling (Python) | `scripts/flashlib/__init__.py` | `__version__` | 0.1.0 |
 
@@ -273,7 +273,7 @@ Kompaktes `SyncPacket` (packed): `magic_id`, `beatCounter`, `virusID`, `mode` wi
 9a. **Batch-Update Badges:** `scripts/batch_flash_herz_schwarm.sh` (siehe Abschnitt *Batch-Update*), Log: `firmware_update_log.csv` / `firmware_update_log.md`, Build-Cache `build_batch/`.
 10. **Build-Artefakte:** Ordner `build_debug/`, `build_batch/` und `build_basestation/` sind in `.gitignore` und gehören nicht ins Repository.
 11. **Abwärtskompatibilität:** Badges mit alter Firmware reagieren nur auf **`mode == 1`** (Virus); `2`–`8` werden ignoriert. Basisstation und Nerves-Controller können trotzdem alle Modi senden.
-12. **Nerves-Controller:** Ordner `herz_schwarm_nerves/`, Elixir/Nerves-App für **Raspberry Pi 4**. Steuert Badges über USB-ESP32-Bridge (ESP-NOW Kanal 13). Web-UI auf Port 4000. Bridge-Firmware: `herz_schwarm_nerves/firmware/esp32_bridge/esp32_bridge.ino` (Arduino, benötigt ArduinoJson-Library). Effektmodi 1–8, Beat-Tap-Tempo, Ambient-RGB-Steuerung. Koexistiert mit Basisstation (unterschiedliche `virusID`s).
+12. **Nerves-Controller:** Ordner `herz_schwarm_nerves/`, Elixir/Nerves-App für **Raspberry Pi 4**. Steuert Badges über USB-ESP32-Bridge (ESP-NOW Kanal 13). Web-UI auf Port 4000 mit Badge-Liste und „🔎 Finden“ (Modus 9, ab Bridge 0.2.0 / App 0.1.2). Bridge-Firmware: `herz_schwarm_nerves/firmware/esp32_bridge/esp32_bridge.ino` (Arduino, benötigt ArduinoJson-Library). Effektmodi 1–8, Beat-Tap-Tempo, Ambient-RGB-Steuerung. Koexistiert mit Basisstation (unterschiedliche `virusID`s).
 13. **Cursor / Arduino CLI:** Zusätzliche Befehle in `.cursor/rules/arduino-cli.mdc`.
 
 ### Code Adjustments

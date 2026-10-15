@@ -9,10 +9,14 @@
  *   {"cmd":"effect","mode":5,"seq":42}
  *   {"cmd":"effect","mode":7,"seq":43,"beatCounter":65280}
  *   {"cmd":"status","seq":44}
+ *   {"cmd":"peers","seq":45}
+ *   {"cmd":"identify","mac":"A0:F2:62:EC:3B:B4","seq":46}
  *
  * Protokoll (Bridge → Pi):
  *   {"evt":"ack","seq":42}
  *   {"evt":"pong","peers":5,"uptime":12345}
+ *   {"evt":"peer","mac":"A0:F2:62:EC:3B:B4","rssi":-74,"fw":"1.3.0","age":40}   (je Station)
+ *   {"evt":"peers","seq":45,"n":5}                                             (Ende der Liste)
  *   {"evt":"log","msg":"bridge ready"}
  *   {"evt":"err","msg":"json parse failed"}
  *
@@ -39,8 +43,8 @@
 #define CCC_CHANNEL     13
 #define MAGIC_ID        0x421337CC
 #define BRIDGE_FW_MAJOR 0
-#define BRIDGE_FW_MINOR 1
-#define BRIDGE_FW_PATCH 6
+#define BRIDGE_FW_MINOR 2
+#define BRIDGE_FW_PATCH 0
 
 #define MAX_JSON_LEN    256
 #define SERIAL_BAUD     115200
@@ -50,6 +54,8 @@
 #define MAX_RETRIES       2      // max. Re-Broadcasts pro Effekt (1 initial + 2 Retries)
 #define STATION_STALE_MS  5000   // Station gilt nach dieser Inaktivität als offline (Badges senden mit 20 Hz)
 #define SYNC_PACKET_LEGACY_LEN 13
+#define SYNC_MODE_IDENTIFY 9     // "Badge finden": SyncPacket + 6 Byte Ziel-MAC (Badge-FW >= 1.3)
+#define IDENTIFY_REPEATS   3     // Funk ist verlustbehaftet; Badge dedupliziert per virusID
 
 struct __attribute__((packed)) SyncPacket {
     uint32_t magic_id;
@@ -71,6 +77,9 @@ struct Station {
     uint8_t  mac[6];
     uint32_t lastSeenMs;
     bool     ackedRound;
+    int8_t   rssi;
+    bool     hasVer;     // false bei 13-Byte-Paketen alter Firmware
+    uint8_t  ver[3];
 };
 
 static Station knownStations[MAX_STATIONS];
@@ -139,6 +148,7 @@ static int findOrAddStation(const uint8_t *mac) {
     memcpy(knownStations[idx].mac, mac, 6);
     knownStations[idx].ackedRound = false;
     knownStations[idx].lastSeenMs = now;
+    knownStations[idx].hasVer = false;
     return idx;
 }
 
@@ -180,10 +190,12 @@ static void onDataRecv(const esp_now_recv_info_t *info, const uint8_t *data, int
     }
 
     uint32_t virusID;
+    const SyncPacket *sp = nullptr;
     if (len == sizeof(AckPacket)) {
         virusID = ((const AckPacket *)data)->virusID;
     } else if (len >= SYNC_PACKET_LEGACY_LEN) {
-        virusID = ((const SyncPacket *)data)->virusID;
+        sp = (const SyncPacket *)data;
+        virusID = sp->virusID;
     } else {
         return;
     }
@@ -192,6 +204,13 @@ static void onDataRecv(const esp_now_recv_info_t *info, const uint8_t *data, int
     int idx = findOrAddStation(info->src_addr);
     if (idx >= 0) {
         knownStations[idx].lastSeenMs = millis();
+        knownStations[idx].rssi = info->rx_ctrl ? info->rx_ctrl->rssi : 0;
+        if (sp && len >= (int)sizeof(SyncPacket)) {
+            knownStations[idx].hasVer = true;
+            knownStations[idx].ver[0] = sp->ver_major;
+            knownStations[idx].ver[1] = sp->ver_minor;
+            knownStations[idx].ver[2] = sp->ver_rel;
+        }
         if (pendingActive && virusID == pendingPkt.virusID) {
             knownStations[idx].ackedRound = true;
         }
@@ -209,6 +228,72 @@ static void sendPong() {
     doc["uptime"] = (uint32_t)(millis() / 1000);
     doc["free_heap"] = ESP.getFreeHeap();
     sendJson(doc);
+}
+
+// Eine Zeile pro aktiver Station, danach {"evt":"peers","n":…} als Listenende.
+static void sendPeers(uint32_t seq) {
+    Station snap[MAX_STATIONS];
+    int n = 0;
+    uint32_t now;
+    portENTER_CRITICAL(&stationMux);
+    now = millis();
+    for (int i = 0; i < knownStationsCount; i++) {
+        if (now - knownStations[i].lastSeenMs <= STATION_STALE_MS) {
+            snap[n++] = knownStations[i];
+        }
+    }
+    portEXIT_CRITICAL(&stationMux);
+
+    for (int i = 0; i < n; i++) {
+        char mac[18], fw[12];
+        snprintf(mac, sizeof(mac), "%02X:%02X:%02X:%02X:%02X:%02X",
+                 snap[i].mac[0], snap[i].mac[1], snap[i].mac[2], snap[i].mac[3], snap[i].mac[4], snap[i].mac[5]);
+        if (snap[i].hasVer) {
+            snprintf(fw, sizeof(fw), "%u.%u.%u", snap[i].ver[0], snap[i].ver[1], snap[i].ver[2]);
+        } else {
+            strcpy(fw, "?");
+        }
+        JsonDocument doc;
+        doc["evt"] = "peer";
+        doc["mac"] = mac;
+        doc["rssi"] = snap[i].rssi;
+        doc["fw"] = fw;
+        doc["age"] = now - snap[i].lastSeenMs;
+        sendJson(doc);
+    }
+    JsonDocument end;
+    end["evt"] = "peers";
+    end["seq"] = seq;
+    end["n"] = n;
+    sendJson(end);
+}
+
+static bool parseMac(const char *s, uint8_t out[6]) {
+    unsigned v[6];
+    if (sscanf(s, "%2x:%2x:%2x:%2x:%2x:%2x", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5]) != 6) return false;
+    for (int i = 0; i < 6; i++) out[i] = (uint8_t)v[i];
+    return true;
+}
+
+// Nur das Badge mit dieser STA-MAC blinkt ~10 s grün. Nicht über die Ack/Retry-
+// Maschine: es antwortet nur ein einziges Badge, die anderen würden Retries auslösen.
+static bool sendIdentify(const uint8_t *mac) {
+    SyncPacket pkt = {};
+    pkt.magic_id = MAGIC_ID;
+    pkt.virusID = (uint32_t)esp_random();
+    pkt.mode = SYNC_MODE_IDENTIFY;
+    pkt.ver_major = BRIDGE_FW_MAJOR;
+    pkt.ver_minor = BRIDGE_FW_MINOR;
+    pkt.ver_rel = BRIDGE_FW_PATCH;
+    uint8_t buf[sizeof(SyncPacket) + 6];
+    memcpy(buf, &pkt, sizeof(pkt));
+    memcpy(buf + sizeof(pkt), mac, 6);
+    bool ok = false;
+    for (int i = 0; i < IDENTIFY_REPEATS; i++) {
+        if (i) delay(15);
+        ok |= (esp_now_send(broadcastMac, buf, sizeof(buf)) == ESP_OK);
+    }
+    return ok;
 }
 
 static void handleCommand(const char *json) {
@@ -262,6 +347,23 @@ static void handleCommand(const char *json) {
     }
     else if (strcmp(cmd, "status") == 0) {
         sendPong();
+    }
+    else if (strcmp(cmd, "peers") == 0) {
+        sendPeers(seq);
+    }
+    else if (strcmp(cmd, "identify") == 0) {
+        uint8_t mac[6];
+        if (!parseMac(doc["mac"] | "", mac)) {
+            sendError("mac must be AA:BB:CC:DD:EE:FF");
+        } else if (sendIdentify(mac)) {
+            sendAck(seq);
+        } else {
+            JsonDocument e;
+            e["evt"] = "err";
+            e["seq"] = seq;
+            e["msg"] = "esp_now_send failed";
+            sendJson(e);
+        }
     }
     else {
         sendError("unknown cmd");

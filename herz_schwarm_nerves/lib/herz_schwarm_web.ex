@@ -34,8 +34,8 @@ defmodule HerzSchwarmWeb do
 
   def live_view do
     quote do
-      use Phoenix.LiveView,
-        layout: {HerzSchwarmWeb.Layouts, :root}
+      # Root-Layout kommt aus dem Router (put_root_layout), kein zweites hier.
+      use Phoenix.LiveView
 
       unquote(html_helpers())
     end

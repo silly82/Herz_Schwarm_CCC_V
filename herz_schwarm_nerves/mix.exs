@@ -14,7 +14,8 @@ defmodule HerzSchwarm.MixProject do
       build_embedded: Mix.env() == :prod,
       deps: deps(),
       releases: [{@app, release()}],
-      aliases: aliases()
+      aliases: aliases(),
+      listeners: [Phoenix.CodeReloader]
     ]
   end
 
@@ -56,11 +57,11 @@ defmodule HerzSchwarm.MixProject do
       {:nerves_pack, "~> 0.7", targets: :rpi4},
 
       # Phoenix / Web
-      {:phoenix, "~> 1.7"},
-      {:phoenix_html, "~> 3.3"},
-      {:phoenix_live_view, "~> 0.20"},
+      {:phoenix, "~> 1.8"},
+      {:phoenix_html, "~> 4.1"},
+      {:phoenix_live_view, "~> 1.1"},
       {:phoenix_live_reload, "~> 1.4", only: :dev},
-      {:phoenix_live_dashboard, "~> 0.8"},
+      {:phoenix_live_dashboard, "~> 0.8.7"},
       {:gettext, "~> 0.26"},
       {:esbuild, "~> 0.8", runtime: Mix.env() == :dev},
       {:tailwind, "~> 0.2", runtime: Mix.env() == :dev},
@@ -88,8 +89,12 @@ defmodule HerzSchwarm.MixProject do
       loadconfig: [&bootstrap/1],
       setup: ["deps.get", "assets.setup", "assets.build"],
       "assets.setup": ["tailwind.install --if-missing", "esbuild.install --if-missing"],
-      "assets.build": ["tailwind default", "esbuild default"],
-      "assets.deploy": ["tailwind default --minify", "esbuild default --minify", "phx.digest"]
+      "assets.build": ["tailwind herz_schwarm", "esbuild herz_schwarm"],
+      "assets.deploy": [
+        "tailwind herz_schwarm --minify",
+        "esbuild herz_schwarm --minify",
+        "phx.digest"
+      ]
     ]
   end
 end

@@ -20,6 +20,8 @@ defmodule HerzSchwarmWeb.DashboardLive do
       |> assign(
         bridge_connected: bridge_connected,
         peer_count: peers.peer_count,
+        peers: peers.peers,
+        find_msg: nil,
         active_mode: effect.active_mode,
         mode_name: effect.mode_name,
         bpm: effect.bpm,
@@ -42,7 +44,7 @@ defmodule HerzSchwarmWeb.DashboardLive do
         </h1>
         <div class="flex items-center gap-3">
           <span class={"badge #{if @bridge_connected, do: "badge-ok", else: "badge-err"}"}>
-            Bridge: {if @bridge_connected, do: "verbunden", do: "getrennt"}
+            Bridge: {if @bridge_connected, do: "verbunden", else: "getrennt"}
           </span>
           <span class="badge badge-info">
             &#x1F4F1; Peers: {@peer_count}
@@ -57,7 +59,12 @@ defmodule HerzSchwarmWeb.DashboardLive do
         <div class="card">
           <h2>&#x26A1; Effekte</h2>
           <div class="btn-grid">
-            <button :for={{mode, name} <- effect_buttons()} class={"btn btn-effect #{btn_class(mode)}"} phx-click="effect" phx-value-mode={mode}>
+            <button
+              :for={{mode, name} <- effect_buttons()}
+              class={"btn btn-effect #{btn_class(mode)}"}
+              phx-click="effect"
+              phx-value-mode={mode}
+            >
               {name}
             </button>
           </div>
@@ -67,7 +74,15 @@ defmodule HerzSchwarmWeb.DashboardLive do
           <h2>&#x1F3B5; Beat-Steuerung</h2>
           <div class="flex items-center gap-3 mb-3">
             <label class="text-sm text-gray-400">BPM</label>
-            <input type="range" min="60" max="180" value={@bpm} phx-change="set-bpm" name="bpm" class="flex-1" />
+            <input
+              type="range"
+              min="60"
+              max="180"
+              value={@bpm}
+              phx-change="set-bpm"
+              name="bpm"
+              class="flex-1"
+            />
             <span class="text-lg font-mono w-12 text-right">{@bpm}</span>
           </div>
           <div class="flex gap-2">
@@ -88,7 +103,13 @@ defmodule HerzSchwarmWeb.DashboardLive do
         <div class="card">
           <h2>&#x1F3A8; Ambient Farbe (Modus 7)</h2>
           <div class="flex items-center gap-3 mb-3">
-            <input type="color" value={@color_hex} phx-change="set-color" name="color" class="w-12 h-10 rounded cursor-pointer" />
+            <input
+              type="color"
+              value={@color_hex}
+              phx-change="set-color"
+              name="color"
+              class="w-12 h-10 rounded cursor-pointer"
+            />
             <span class="font-mono text-sm text-gray-400">{@color_hex}</span>
           </div>
           <button class="btn btn-ambient w-full" phx-click="effect" phx-value-mode="7">
@@ -112,19 +133,52 @@ defmodule HerzSchwarmWeb.DashboardLive do
         </div>
       </div>
 
+      <div class="card mb-6">
+        <h2>&#x1F50E; Badges</h2>
+        <p :if={@peers == []} class="text-sm text-gray-400">
+          Keine Badges in Funkreichweite der Bridge (Liste aktualisiert alle 5 s).
+        </p>
+        <table :if={@peers != []} class="w-full text-sm">
+          <thead>
+            <tr class="text-left text-gray-400">
+              <th class="py-1">MAC</th>
+              <th>RSSI</th>
+              <th>FW</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr :for={p <- @peers} class="border-t border-gray-800">
+              <td class="py-1 font-mono">{p.mac}</td>
+              <td class="font-mono">{p.rssi} dBm</td>
+              <td class="font-mono">{p.fw}</td>
+              <td class="text-right">
+                <button
+                  :if={can_identify?(p.fw)}
+                  class="btn btn-go btn-effect"
+                  phx-click="identify"
+                  phx-value-mac={p.mac}
+                >
+                  🔎 Finden
+                </button>
+                <span :if={!can_identify?(p.fw)} class="text-xs text-gray-500">FW &lt; 1.3</span>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+        <p :if={@find_msg} class="text-sm text-gray-400 mt-2">{@find_msg}</p>
+      </div>
+
       <div class="card">
         <h2>&#x1F4CB; Zone-Hinweis</h2>
         <p class="text-sm text-gray-400">
-          Zonen-Farben sind compile-time im Badge-Firmware festgelegt:
-          <span class="text-red-400">Nah (&gt; -55 dBm) = Rot</span>,
-          <span class="text-yellow-400">Mitte (&gt; -75 dBm) = Gelb</span>,
-          <span class="text-blue-400">Fern (&le; -75 dBm) = Blau</span>.
+          Zonen-Farben sind compile-time im Badge-Firmware festgelegt: <span class="text-red-400">Nah (&gt; -55 dBm) = Rot</span>, <span class="text-yellow-400">Mitte (&gt; -75 dBm) = Gelb</span>, <span class="text-blue-400">Fern (&le; -75 dBm) = Blau</span>.
           Modus 6 l&ouml;st bei allen Badges gleichzeitig aus; die Farbe wird per RSSI gew&auml;hlt.
         </p>
       </div>
 
       <footer class="mt-8 text-center text-xs text-gray-600">
-        Herz-Schwarm Nerves Controller v0.1.0 &middot; ESP-NOW Kanal 13 &middot; Bridge UART
+        Herz-Schwarm Nerves Controller v{Application.spec(:herz_schwarm, :vsn)} &middot; ESP-NOW Kanal 13 &middot; Bridge UART
       </footer>
     </div>
     """
@@ -174,6 +228,16 @@ defmodule HerzSchwarmWeb.DashboardLive do
     {:noreply, assign(socket, color: {r, g, b}, color_hex: hex)}
   end
 
+  def handle_event("identify", %{"mac" => mac}, socket) do
+    msg =
+      case PeerTracker.identify(mac) do
+        :ok -> "#{mac} blinkt jetzt 10 s grün."
+        {:error, :invalid_mac} -> "Ungültige MAC: #{mac}"
+      end
+
+    {:noreply, assign(socket, find_msg: msg)}
+  end
+
   def handle_event("stop-all", _, socket) do
     EffectEngine.stop_all()
     {:noreply, socket}
@@ -196,6 +260,7 @@ defmodule HerzSchwarmWeb.DashboardLive do
     {:noreply,
      assign(socket,
        peer_count: status.peer_count,
+       peers: status.peers,
        bridge_connected: status.bridge_connected
      )}
   end
@@ -216,15 +281,23 @@ defmodule HerzSchwarmWeb.DashboardLive do
 
   defp effect_buttons do
     [
-      {1, "&#x26A1; Virus"},
-      {2, "&#x1F308; Regenbogen"},
-      {3, "&#x2728; Primzahl"},
-      {4, "&#x1F30A; Welle"},
-      {5, "&#x1F3B5; Beat"},
-      {6, "&#x1F3AF; Zone"},
-      {7, "&#x1F3A8; Ambient"},
-      {8, "&#x1F4A5; Strobe"}
+      {1, "⚡ Virus"},
+      {2, "🌈 Regenbogen"},
+      {3, "✨ Primzahl"},
+      {4, "🌊 Welle"},
+      {5, "🎵 Beat"},
+      {6, "🎯 Zone"},
+      {7, "🎨 Ambient"},
+      {8, "💥 Strobe"}
     ]
+  end
+
+  # Identify (Modus 9) versteht erst Badge-FW 1.3.0; Stationen (0.x) gar nicht.
+  defp can_identify?(fw) do
+    case Version.parse(fw) do
+      {:ok, v} -> v.major >= 1 and Version.compare(v, Version.parse!("1.3.0")) != :lt
+      :error -> false
+    end
   end
 
   defp btn_class(1), do: "btn-virus"

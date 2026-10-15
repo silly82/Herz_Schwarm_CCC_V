@@ -19,7 +19,11 @@ defmodule HerzSchwarm.Bridge do
   @reconnect_ms_initial 2_000
   @reconnect_ms_max 30_000
   @poll_status_ms 5_000
-  @uart_opts [speed: 115200, active: true, framing: {Circuits.UART.Framing.Line, separator: "\n"}]
+  @uart_opts [
+    speed: 115_200,
+    active: true,
+    framing: {Circuits.UART.Framing.Line, separator: "\n"}
+  ]
 
   defstruct [:uart_pid, :port, :connected, :seq, :buffer, :reconnect_ms]
 
@@ -100,9 +104,10 @@ defmodule HerzSchwarm.Bridge do
   @impl true
   def handle_info(:poll_status, state) do
     if state.connected do
-      seq = state.seq + 1
-      json = Jason.encode!(%{cmd: "status", seq: seq}) <> "\n"
-      UART.write(state.uart_pid, json)
+      # status -> pong (Anzahl), peers -> eine "peer"-Zeile je Badge + "peers" als Ende
+      seq = state.seq + 2
+      UART.write(state.uart_pid, Jason.encode!(%{cmd: "status", seq: seq - 1}) <> "\n")
+      UART.write(state.uart_pid, Jason.encode!(%{cmd: "peers", seq: seq}) <> "\n")
       Process.send_after(self(), :poll_status, @poll_status_ms)
       {:noreply, %{state | seq: seq}}
     else
