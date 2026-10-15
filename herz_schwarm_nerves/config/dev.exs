@@ -19,14 +19,9 @@ config :herz_schwarm, HerzSchwarmWeb.Endpoint,
     ]
   ]
 
-# :uart_device wird in config/config.exs gesetzt (vor import_config),
-# damit es schon zur Application.start/2-Zeit verfuegbar ist. Hier nur
-# Override moeglich (z. B. expliziter Test mit COM3 auf Windows).
-
 config :herz_schwarm, bridge_enabled: true
 
 config :phoenix, :stacktrace_depth, 20
 config :phoenix, :plug_init_mode, :runtime
 
-# UART-Device wird in config.exs mit Path.wildcard-Auto-Detect aufgeloest.
-# Override via UART_DEVICE=/dev/cu.usbmodem101 env var.
+# Bridge-Port: Auto-Detect in HerzSchwarm.Bridge; Override per UART_DEVICE=/dev/cu.usbmodem101.

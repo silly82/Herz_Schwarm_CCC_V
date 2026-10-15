@@ -59,8 +59,7 @@ Der Port `/dev/cu.usbmodem14101` ist exemplarisch — `arduino-cli board list` z
 ```bash
 cd herz_schwarm_nerves
 
-# Auto-detect: nimmt /dev/cu.usbserial-1410 (ESP32-S3 USB-CDC)
-# oder /dev/ttyUSB0 (Linux) wenn nichts gefunden
+# Auto-Detect: fragt alle ESP32-/USB-Seriell-Ports mit "status" an, nimmt den mit "pong"
 mix phx.server
 
 # Oder mit explizitem Port:
@@ -87,17 +86,21 @@ ls -la /dev/cu.usb* /dev/cu.wch* /dev/cu.SLAB* 2>/dev/null
 ioreg -p IOUSB -l | grep -i "usb serial\|usb-serial"
 ```
 
-**Default-Logik** (in `config/dev.exs`):
+**Port-Auswahl** (ab App 0.1.2):
+Die Bridge wird zur Laufzeit erkannt (`lib/herz_schwarm/bridge.ex`, bei jedem (Re-)Connect neu):
 1. `UART_DEVICE` env-var (höchste Priorität)
-2. macOS: prüft `/dev/cu.usbserial-1410` und `/dev/cu.SLAB_USBtoUART`
-3. Fallback: `/dev/ttyUSB0` (für Linux-Dev)
+2. `config :herz_schwarm, :uart_device` (standardmäßig nicht gesetzt)
+3. Auto-Detect: alle USB-Seriell-Ports von Espressif / CP210x / CH340 / FTDI werden der Reihe nach
+   mit `{"cmd":"status"}` angefragt; der erste, der mit `pong` antwortet, ist die Bridge.
+   Badges/Basisstation am selben Rechner antworten nicht und werden übersprungen.
+   Nichts gefunden → Warnung im Log, neuer Versuch mit Backoff (2 s … 30 s).
 
 ## Was die App auf dem Mac macht
 
 | Komponente | Verhalten auf Mac |
 |------------|-------------------|
 | Phoenix.PubSub | läuft lokal |
-| `HerzSchwarm.Bridge` | öffnet `/dev/cu.usbserial-1410` (115200 Baud) |
+| `HerzSchwarm.Bridge` | öffnet den erkannten Bridge-Port (115200 Baud) |
 | `HerzSchwarm.EffectEngine` | läuft im Speicher |
 | `HerzSchwarm.PeerTracker` | hört auf Bridge-Events |
 | LiveView Web-UI | `http://localhost:4000` |
@@ -291,15 +294,13 @@ UART_DEVICE=/dev/cu.usbmodem101 mix phx.server
 
 ### Auto-Detect (alternativ, ohne env-var)
 
-`config/dev.exs` versucht `Path.wildcard` auf macOS-Pfade:
-
+Die Bridge wird zur Laufzeit erkannt (`lib/herz_schwarm/bridge.ex`, bei jedem (Re-)Connect neu):
 1. `UART_DEVICE` env-var (höchste Priorität)
-2. `/dev/cu.usbserial-*` (ESP32-S3 native USB)
-3. `/dev/cu.SLAB_USBtoUART` (CP2102)
-4. `/dev/cu.usbmodem*` (XIAO-C6, CH340) — **meistens der richtige**
-5. Fallback `/dev/ttyUSB0` (Linux)
-
-**Bekannter Bug**: `Application.get_env(:herz_schwarm, :uart_device, "/dev/ttyUSB0")` in `bridge.ex:45` fängt die Auto-Detect-Resolution **nicht ab** zur Init-Zeit. Workaround: immer `UART_DEVICE=...` explizit setzen.
+2. `config :herz_schwarm, :uart_device` (standardmäßig nicht gesetzt)
+3. Auto-Detect: alle USB-Seriell-Ports von Espressif / CP210x / CH340 / FTDI werden der Reihe nach
+   mit `{"cmd":"status"}` angefragt; der erste, der mit `pong` antwortet, ist die Bridge.
+   Badges/Basisstation am selben Rechner antworten nicht und werden übersprungen.
+   Nichts gefunden → Warnung im Log, neuer Versuch mit Backoff (2 s … 30 s).
 
 ### Port wechseln ohne Code-Änderung
 
@@ -307,8 +308,7 @@ UART_DEVICE=/dev/cu.usbmodem101 mix phx.server
 # Anderes C6 (anderer USB-Port)
 UART_DEVICE=/dev/cu.usbmodem14101 mix phx.server
 
-# Linux-Build (Pi 4)
-MIX_TARGET=rpi4 mix phx.server  # nutzt target.exs
+# Pi 4: Auto-Detect findet ttyUSB* (CH340/CP2102) und ttyACM* (natives USB, z. B. ESP32-C3)
 ```
 
 ### Phoenix-Web-UI
@@ -426,31 +426,32 @@ EffectEngine.stop_all()
 ### UART-Bridge verbindet nicht
 - `ls /dev/cu.*` zeigt das Device?
 - ESP32-Bridge-Sketch korrekt geflasht? (115200 Baud, newline JSON)
-- `UART_DEVICE=/dev/cu.usbmodem101 mix phx.server` setzen (umgeht Auto-Detect-Bug)
+- Log zeigt `Keine ESP32-Bridge gefunden` → Bridge antwortet nicht auf `status` (falsche Firmware/Baudrate?)
+- Mit `config :logger, level: :debug` zeigt `Bridge-Probe <port>: …` jeden geprüften Port
+- Notfalls Port fest vorgeben: `UART_DEVICE=/dev/cu.usbmodem101 mix phx.server`
 - Logs prüfen: `[debug] Reconnect scheduled in 2000ms` → Bridge ist im Reconnect-Loop
-
-### Reconnect-Loop auf `/dev/ttyUSB0` (Linux ohne ESP32)
-- Setze `UART_DEVICE=` explizit oder installiere `plug_cowboy` neu
-- Oder fix in `lib/herz_schwarm/bridge.ex:45`: ersetze `Application.get_env(..., "/dev/ttyUSB0")` durch `Application.fetch_env!(:herz_schwarm, :uart_device)`
 
 ### `circuits_uart` Permission denied
 - macOS: `sudo chmod 666 /dev/cu.usbmodem101` (für Dev)
 - Oder User zu `dialout`-Gruppe hinzufügen (Linux, nicht macOS-relevant)
 
 ### `Plug.Cowboy.Translator.translate/4 is undefined`
-- `plug_cowboy 2.9.0` ist nicht mit OTP 28 / Elixir 1.18 kompatibel
-- Fix: `mix.exs` Dep `{:plug_cowboy, "~> 2.6"}` entfernen (Bandit wird bereits genutzt)
+- Behoben in App 0.1.2: Ursache war, dass `config/*.exs` nie geladen wurde (`loadconfig`-Alias in
+  `mix.exs` rief den Task nicht auf) → Phoenix fiel auf Cowboy zurück. Jetzt Bandit als Dep, Cowboy raus.
+- Tritt es wieder auf: `mix deps.unlock --unused && mix deps.clean --unused --unlock`
 
 ### C6-USB-Probleme
 - **ROM-Bootloader (PID 0x1001) sichtbar statt USB-CDC**: Reset-Taste drücken, USB-Cabel kurz ziehen
 - **Port verschwindet zwischen Runs**: Mac-USB-Energie-Management, USB-Hub mit eigener Stromversorgung verwenden
 - **C6 antwortet nicht auf JSON**: Baud-Rate prüfen (115200), Boot-Message "bridge ready" sollte kommen
 
-## Bekannte Bugs (Stand v1.2.0.3)
+## Bekannte Bugs (Stand App 0.1.2)
 
-1. **Bridge-Init Default-Bug**: `Application.get_env` fällt auf `/dev/ttyUSB0` zurück, Auto-Detect wird ignoriert
-   - **Workaround**: `UART_DEVICE=/dev/cu.usbmodem101 mix phx.server`
-2. **Plug.Cowboy-Translator-Crash**: sporadisch, abhängig von Logger-Events
-   - **Workaround**: `plug_cowboy` Dep aus `mix.exs` entfernen
-3. **C6 USB-Cable-Reset**: Port-File bleibt erhalten, aber USB-Bus verschwindet
+Behoben in 0.1.2: Bridge-Port-Default `/dev/ttyUSB0` / falscher `usbmodem*`-Port (jetzt status/pong-Probe),
+Plug.Cowboy-Translator-Crash (Config wurde nicht geladen, jetzt Bandit), Abziehen der Bridge wurde nicht
+erkannt (falsches `circuits_uart`-Nachrichtenformat).
+
+1. **phoenix_live_view 0.20.x** hat ein Advisory (EEF-CVE-2026-64941, LOW, Open Redirect) — Fix erst in 1.x,
+   Upgrade braucht Phoenix 1.8 / phoenix_html 4 (größerer Umbau).
+2. **C6 USB-Cable-Reset**: Port-File bleibt erhalten, aber USB-Bus verschwindet
    - **Workaround**: USB-Hub mit eigener Stromversorgung verwenden

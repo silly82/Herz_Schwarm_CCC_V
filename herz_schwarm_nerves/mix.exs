@@ -2,7 +2,7 @@ defmodule HerzSchwarm.MixProject do
   use Mix.Project
 
   @app :herz_schwarm
-  @version "0.1.1"
+  @version "0.1.2"
 
   def project do
     [
@@ -14,9 +14,12 @@ defmodule HerzSchwarm.MixProject do
       build_embedded: Mix.env() == :prod,
       deps: deps(),
       releases: [{@app, release()}],
-      preferred_cli_target: [run: :host, test: :host],
-      aliases: [loadconfig: [&bootstrap/1]]
+      aliases: aliases()
     ]
+  end
+
+  def cli do
+    [preferred_targets: [run: :host, test: :host]]
   end
 
   def application do
@@ -36,9 +39,12 @@ defmodule HerzSchwarm.MixProject do
     ]
   end
 
+  # Muss am Ende loadconfig selbst aufrufen: der Alias ersetzt den Task.
+  # Ohne diesen Aufruf wird config/*.exs nie geladen (Endpoint ohne Port,
+  # Phoenix faellt auf Cowboy zurueck, :uart_device bleibt nil).
   defp bootstrap(args) do
     Application.start(:nerves_bootstrap)
-    args
+    Mix.Task.run("loadconfig", args)
   end
 
   defp deps do
@@ -58,6 +64,7 @@ defmodule HerzSchwarm.MixProject do
       {:gettext, "~> 0.26"},
       {:esbuild, "~> 0.8", runtime: Mix.env() == :dev},
       {:tailwind, "~> 0.2", runtime: Mix.env() == :dev},
+      {:bandit, "~> 1.5"},
       {:jason, "~> 1.4"},
       {:telemetry_poller, "~> 1.0"},
       {:heroicons,
@@ -78,6 +85,7 @@ defmodule HerzSchwarm.MixProject do
 
   defp aliases do
     [
+      loadconfig: [&bootstrap/1],
       setup: ["deps.get", "assets.setup", "assets.build"],
       "assets.setup": ["tailwind.install --if-missing", "esbuild.install --if-missing"],
       "assets.build": ["tailwind default", "esbuild default"],

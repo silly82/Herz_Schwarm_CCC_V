@@ -43,19 +43,11 @@ defmodule HerzSchwarm.Bridge do
 
   @impl true
   def init(_opts) do
-    # Resolve port: Application.get_env first (normal path), then
-    # Path.wildcard auto-detect as fallback. This handles the case where
-    # supervisor starts the child before dev.exs runs (Mix 1.18 timing).
-    port =
-      case Application.get_env(:herz_schwarm, :uart_device) do
-        nil -> resolve_uart_device() || raise_uart_not_configured!()
-        p when is_binary(p) -> p
-        other -> raise ":uart_device must be a binary path, got: #{inspect(other)}"
-      end
-
+    # Port wird erst beim :connect aufgeloest (und bei jedem Reconnect neu),
+    # damit eine spaeter eingesteckte oder umbenannte Bridge gefunden wird.
     state = %__MODULE__{
       uart_pid: nil,
-      port: port,
+      port: nil,
       connected: false,
       seq: 0,
       buffer: "",
@@ -90,27 +82,18 @@ defmodule HerzSchwarm.Bridge do
 
   @impl true
   def handle_info(:connect, state) do
-    case UART.start_link() do
-      {:ok, pid} ->
-        case UART.open(pid, state.port, @uart_opts) do
-          :ok ->
-            Logger.info("Bridge connected on #{state.port}")
-            # Reset backoff on successful connect
-            broadcast({:bridge, :connected})
-            Process.send_after(self(), :poll_status, @poll_status_ms)
-            {:noreply, %{state | uart_pid: pid, connected: true, reconnect_ms: @reconnect_ms_initial}}
+    case resolve_port() do
+      nil ->
+        Logger.warning(
+          "Keine ESP32-Bridge gefunden (kein Port antwortet auf status). " <>
+            "Fester Port: UART_DEVICE=/dev/... setzen."
+        )
 
-          {:error, reason} ->
-            Logger.warning("Failed to open #{state.port}: #{inspect(reason)}")
-            UART.stop(pid)
-            schedule_reconnect(state)
-            {:noreply, %{state | connected: false}}
-        end
-
-      {:error, reason} ->
-        Logger.warning("Failed to start UART: #{inspect(reason)}")
         schedule_reconnect(state)
-        {:noreply, %{state | connected: false}}
+        {:noreply, %{state | connected: false, reconnect_ms: next_backoff(state.reconnect_ms)}}
+
+      port ->
+        open_port(%{state | port: port})
     end
   end
 
@@ -140,72 +123,104 @@ defmodule HerzSchwarm.Bridge do
     {:noreply, state}
   end
 
-  def handle_info({:circuits_uart, _port, :partial, partial}, state) do
+  def handle_info({:circuits_uart, _port, {:partial, partial}}, state) do
     {:noreply, %{state | buffer: state.buffer <> partial}}
   end
 
-  def handle_info({:circuits_uart, _port, :error, reason}, state) do
+  def handle_info({:circuits_uart, _port, {:error, reason}}, state) do
     Logger.warning("UART error: #{inspect(reason)}")
+    if state.uart_pid, do: UART.stop(state.uart_pid)
+    state = %{state | uart_pid: nil}
     broadcast({:bridge, :disconnected})
     # Increase backoff after an error during operation
-    schedule_reconnect(%{state | reconnect_ms: next_backoff(state.reconnect_ms)})
-    {:noreply, %{state | connected: false}}
+    state = %{state | connected: false, reconnect_ms: next_backoff(state.reconnect_ms)}
+    schedule_reconnect(state)
+    {:noreply, state}
   end
 
-  # Raises with helpful instructions when no UART device can be resolved.
-  defp raise_uart_not_configured! do
-    raise """
-    :herz_schwarm, :uart_device is not configured and no USB-serial
-    device could be auto-detected.
+  defp open_port(state) do
+    {:ok, pid} = UART.start_link()
 
-    Fix: Set UART_DEVICE env var to your ESP32 bridge:
-      UART_DEVICE=/dev/cu.usbmodem101 mix phx.server
+    case UART.open(pid, state.port, @uart_opts) do
+      :ok ->
+        Logger.info("Bridge connected on #{state.port}")
+        broadcast({:bridge, :connected})
+        Process.send_after(self(), :poll_status, @poll_status_ms)
+        {:noreply, %{state | uart_pid: pid, connected: true, reconnect_ms: @reconnect_ms_initial}}
 
-    For XIAO ESP32-C6: usually /dev/cu.usbmodem101
-    For ESP32-S3 (native USB): usually /dev/cu.usbserial-1410
-    For ESP32 with CH340/CP2102: usually /dev/cu.usbmodem14101
-    """
-  end
-
-  # Fallback UART-Device resolution: checks UART_DEVICE env-var first,
-  # then does Path.wildcard on common macOS USB-serial patterns. On
-  # Linux, defaults to /dev/ttyUSB0 (typical for CH340/CP2102). On
-  # macOS, returns nil if no device found (caller raises loud).
-  defp resolve_uart_device do
-    case System.get_env("UART_DEVICE") do
-      nil ->
-        cond do
-          match?({:win32, _}, :os.type()) ->
-            "COM3"
-
-          match?({:unix, :darwin}, :os.type()) ->
-            # macOS: only return a port we actually found, never a Linux path
-            first_found([
-              "/dev/cu.usbserial-*",
-              "/dev/cu.SLAB_USBtoUART",
-              "/dev/cu.usbmodem*"
-            ])
-
-          true ->
-            # Linux: default to ttyUSB0 (CH340/CP2102 USB-serial bridges)
-            first_found([
-              "/dev/ttyUSB*",
-              "/dev/ttyACM*"
-            ]) || "/dev/ttyUSB0"
-        end
-
-      dev ->
-        dev
+      {:error, reason} ->
+        Logger.warning("Failed to open #{state.port}: #{inspect(reason)}")
+        UART.stop(pid)
+        schedule_reconnect(state)
+        {:noreply, %{state | connected: false, reconnect_ms: next_backoff(state.reconnect_ms)}}
     end
   end
 
-  defp first_found(patterns) do
-    Enum.find_value(patterns, fn pattern ->
-      case Path.wildcard(pattern) do
-        [first | _] -> first
-        _ -> nil
+  # Reihenfolge: UART_DEVICE-Env > config :uart_device > Auto-Detect.
+  defp resolve_port do
+    System.get_env("UART_DEVICE") ||
+      Application.get_env(:herz_schwarm, :uart_device) ||
+      detect_bridge()
+  end
+
+  # Auto-Detect: nur USB-Seriell-Chips, die als Bridge in Frage kommen, und
+  # davon der erste, der auf {"cmd":"status"} mit "pong" antwortet. Badges und
+  # Basisstation haben dieselbe Espressif-VID, lesen aber kein Serial -> kein pong.
+  # Espressif (natives USB: C3/S3/C6), Silicon Labs CP210x, WCH CH340/CH9102, FTDI
+  @bridge_vids [0x303A, 0x10C4, 0x1A86, 0x0403]
+  @probe_timeout_ms 1_500
+
+  defp detect_bridge do
+    UART.enumerate()
+    |> Enum.filter(fn {_name, info} -> Map.get(info, :vendor_id) in @bridge_vids end)
+    |> Enum.map(fn {name, _info} -> name end)
+    |> Enum.sort()
+    |> Enum.map(&normalize_path/1)
+    |> Enum.find(&probe/1)
+  end
+
+  # enumerate liefert unter Linux "ttyACM0", unter macOS "/dev/cu.usbmodem…".
+  defp normalize_path("/dev/" <> _ = path), do: path
+  defp normalize_path(name), do: "/dev/" <> name
+
+  defp probe(path) do
+    {:ok, pid} = UART.start_link()
+
+    try do
+      case UART.open(pid, path, Keyword.put(@uart_opts, :active, false)) do
+        :ok ->
+          UART.write(pid, ~s({"cmd":"status","seq":0}\n))
+          deadline = System.monotonic_time(:millisecond) + @probe_timeout_ms
+          found = await_pong(pid, deadline)
+          Logger.debug("Bridge-Probe #{path}: #{if found, do: "pong", else: "keine Antwort"}")
+          found
+
+        {:error, reason} ->
+          Logger.debug("Bridge-Probe #{path}: #{inspect(reason)}")
+          false
       end
-    end)
+    after
+      UART.stop(pid)
+    end
+  end
+
+  defp await_pong(pid, deadline) do
+    remaining = deadline - System.monotonic_time(:millisecond)
+
+    if remaining <= 0 do
+      false
+    else
+      case UART.read(pid, remaining) do
+        {:ok, line} when is_binary(line) and line != "" ->
+          String.contains?(line, ~s("evt":"pong")) or await_pong(pid, deadline)
+
+        {:ok, _} ->
+          await_pong(pid, deadline)
+
+        {:error, _} ->
+          false
+      end
+    end
   end
 
   defp next_backoff(current) do
