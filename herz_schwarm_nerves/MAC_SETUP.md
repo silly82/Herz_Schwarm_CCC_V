@@ -45,13 +45,12 @@ Du brauchst einen simplen ESP32 (oder ESP32-S3) als USB-Bridge zwischen Mac und 
 
 ```bash
 # Aus dem Repo-Wurzel
-arduino-cli compile --fqbn esp32:esp32:esp32s3 \
-  herz_schwarm_nerves/firmware/esp32_bridge/
-
-arduino-cli upload -p /dev/cu.usbmodem14101 \
-  --fqbn esp32:esp32:esp32s3 \
-  herz_schwarm_nerves/firmware/esp32_bridge/
+# ESP32-S3: FQBN inkl. CDCOnBoot=cdc kommt aus firmware/esp32_bridge/sketch.yaml
+arduino-cli compile herz_schwarm_nerves/firmware/esp32_bridge/
+arduino-cli upload -p /dev/cu.usbmodem14101 herz_schwarm_nerves/firmware/esp32_bridge/
 ```
+
+**Wichtig bei ESP32-S3 mit nativem USB:** `CDCOnBoot=cdc` ist Pflicht — ohne geht `Serial` auf UART0 statt auf das USB-Kabel, und die Bridge antwortet am Mac/Pi nicht. `sketch.yaml` setzt das automatisch, solange kein eigenes `--fqbn` übergeben wird (für den C6 unten wird `--fqbn` explizit gesetzt und überschreibt die Datei).
 
 Der Port `/dev/cu.usbmodem14101` ist exemplarisch — `arduino-cli board list` zeigt deinen echten. **Sicherstellen, dass der ESP32 kein Badge-Sketch drauf hat**, sondern die `esp32_bridge.ino`.
 
@@ -360,19 +359,22 @@ ioreg -p IOUSB -l | grep -i "usb serial\|usb-serial"
 
 **Wenn Probleme:** Eine Station deaktivieren (z. B. Web-UI der ESP32-S3-Basisstation nicht benutzen, nur Nerves verwenden, oder umgekehrt).
 
-## Ack/Retry-Mechanismus der Nerves-Bridge (ab Bridge-FW v0.1.2)
+## Ack/Retry-Mechanismus der Nerves-Bridge (ab Bridge-FW v0.1.2, implizites Ack ab v0.1.3)
 
 Nur der Nerves-Pfad (Modus 3: Matrix + Basisstation + Nerves) hat zuverlässige Zustellung. Modus 2 (Basisstation allein) bleibt bewusst fire-and-forget — dort existiert kein Ack.
 
 **Ablauf:**
 1. Bridge broadcastet ein `SyncPacket` (wie bisher).
-2. Jede Station, die es empfängt, sendet ein `AckPacket` (magic_id + virusID) per ESP-NOW-Unicast an die Absender-MAC zurück.
-3. Haben nicht alle zuletzt aktiven (< 30s) Stationen innerhalb von 150ms geantwortet, broadcastet die Bridge das gleiche Paket erneut — max. 2 Retries (3 Sends insgesamt).
-4. Stationen ohne Lebenszeichen seit 30s gelten als offline und blockieren keine Retries mehr.
+2. **Implizites Ack (ab v0.1.3):** Badges broadcasten laufend ihr `SyncPacket` (20 Hz) und übernehmen dabei die `virusID` des gerade laufenden Effekts. Empfängt die Bridge ein SyncPacket mit der `virusID` des ausstehenden Effekts, gilt das als Ack. Jedes empfangene SyncPacket markiert die Station außerdem als aktiv. Funktioniert mit jeder Badge-Firmware, kein Extra-Paket nötig.
+3. **Explizites Ack (weiterhin unterstützt):** Eine Station kann alternativ ein `AckPacket` (magic_id + virusID, 8 Byte) per ESP-NOW-Unicast an die Absender-MAC senden.
+4. Haben nicht alle zuletzt aktiven (< 5s) Stationen innerhalb von 150ms bestätigt, broadcastet die Bridge das gleiche Paket erneut — max. 2 Retries (3 Sends insgesamt).
+5. Stationen ohne Lebenszeichen seit 5s gelten als offline und blockieren keine Retries mehr; ihr Slot wird für neue Stationen wiederverwendet.
+
+**Bis v0.1.2** wartete die Bridge ausschließlich auf `AckPacket`s — die Badge-Firmware sendet aber keine, daher blieb `peers` immer `0` und Retries wurden nie ausgelöst.
 
 **Peer-Count:** `{"evt":"pong","peers":N,...}` liefert jetzt die echte Anzahl zuletzt aktiver Stationen (vorher immer `0`, das Feld wurde nie gesetzt). Der Pi pollt `{"cmd":"status"}` alle 5s automatisch (`HerzSchwarm.Bridge`), das Dashboard zeigt den Wert live über `PeerTracker`.
 
-**Für die Stations-Firmware** (separates Repo, nicht hier): nach Empfang eines validen `SyncPacket` ein `AckPacket{magic_id: 0x421337CC, virusID: <empfangene virusID>}` per `esp_now_send()` unicast an die Absender-MAC zurücksenden. Die Bridge-MAC muss dafür einmalig als ESP-NOW-Peer registriert werden (unverschlüsselt, Kanal 13).
+**Für Stations-Firmware ohne eigenen SyncPacket-Broadcast** (separates Repo, nicht hier): nach Empfang eines validen `SyncPacket` ein `AckPacket{magic_id: 0x421337CC, virusID: <empfangene virusID>}` per `esp_now_send()` unicast an die Absender-MAC zurücksenden. Die Bridge-MAC muss dafür einmalig als ESP-NOW-Peer registriert werden (unverschlüsselt, Kanal 13).
 
 ## Production-Build (für Raspberry Pi 4)
 

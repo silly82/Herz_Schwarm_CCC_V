@@ -28,7 +28,7 @@
  */
 #define FW_VERSION_MAJOR 1
 #define FW_VERSION_MINOR   2
-#define FW_VERSION_PATCH   0
+#define FW_VERSION_PATCH   1
 #define FW_DEBUG_BUILD     1  // Nur Debug-Zweig: bei sichtbarem neuen Debug-Stand +1, max 99
 
 #if FW_DEBUG_BUILD < 1 || FW_DEBUG_BUILD > 99
@@ -47,6 +47,7 @@
 #define MAGIC_ID    0x421337CC  
 #define PEER_TIMEOUT 4000       // Nach 4 Sek. wird ein verschwundenes Badge gelöscht
 #define MAX_PEERS   25
+#define SYNC_TX_INTERVAL_MS 50  // 20 Hz Sync-Broadcast (Frame-Rate bleibt 50 Hz)
 
 // Remote-Effekte (Basisstation / kompatibles Paket): mode im SyncPacket
 #define SYNC_MODE_VIRUS    1  // weißer Blitz (wie Morse -.-.) — 3 s
@@ -160,64 +161,56 @@ static void printFwVersionBanner() {
 }
 #endif
 
+static void sendSync(uint8_t mode, uint32_t fxId) {
+    txData.magic_id = MAGIC_ID;
+    txData.beatCounter = heartBeatState;
+    txData.virusID = fxId;
+    txData.mode = mode;
+    txData.ver_major = FW_VERSION_MAJOR;
+    txData.ver_minor = FW_VERSION_MINOR;
+    txData.ver_rel = FW_VERSION_PATCH;
+#if ENABLE_SERIAL_DEBUG
+    txData.ver_dbg = FW_DEBUG_BUILD;
+#else
+    txData.ver_dbg = 0;
+#endif
+    // Fehler ignorieren — nächster Sendezyklus sendet wieder
+    esp_now_send(broadcastMac, (uint8_t *)&txData, sizeof(txData));
+}
+
 // --- HELPER: PRIMZAHL (LUT, O(1)) ---
 static inline bool isPrimeFast(uint8_t n) {
     return (n < 27) ? primeLUT[n] : false;
 }
 
-// --- PEER TRACKING: Hash-Index statt O(n²) ---
-// MAC[5] als Index (letztes Byte), Kollisionsliste
-static int8_t peerHashHead[256];
-static int8_t peerHashNext[MAX_PEERS];
-
-static void peerHashInit() {
-    memset(peerHashHead, -1, sizeof(peerHashHead));
-    memset(peerHashNext, -1, sizeof(peerHashNext));
-}
-
-static int peerHashFind(const uint8_t* mac) {
-    int8_t idx = peerHashHead[mac[5]];
-    while (idx >= 0) {
-        if (memcmp(seenPeers[idx].mac, mac, 6) == 0) return idx;
-        idx = peerHashNext[idx];
-    }
-    return -1;
-}
-
-static void peerHashInsert(uint8_t slot, const uint8_t* mac) {
-    peerHashNext[slot] = peerHashHead[mac[5]];
-    peerHashHead[mac[5]] = slot;
-}
-
+// --- PEER TRACKING: lineare Suche ---
+// Bei MAX_PEERS=25 schneller als jeder Hash und ohne Verwaltungs-Zustand,
+// der beim Wiederbelegen freier Slots inkonsistent werden kann.
 static void trackBadge(const uint8_t* mac, bool hasVer, uint8_t vmaj, uint8_t vmin, uint8_t vrel,
                        uint8_t vdbg) {
     uint32_t now = millis();
-    int found = peerHashFind(mac);
-    if (found >= 0) {
-        seenPeers[found].lastSeen = now;
-        if (hasVer) {
-            seenPeers[found].ver_major = vmaj;
-            seenPeers[found].ver_minor = vmin;
-            seenPeers[found].ver_rel = vrel;
-            seenPeers[found].ver_dbg = vdbg;
-            seenPeers[found].ver_known = 1;
-        }
-        return;
-    }
+    int slot = -1;
     for (int i = 0; i < MAX_PEERS; i++) {
         if (seenPeers[i].lastSeen == 0) {
-            memcpy(seenPeers[i].mac, mac, 6);
-            seenPeers[i].lastSeen = now;
-            peerHashInsert(i, mac);
-            if (hasVer) {
-                seenPeers[i].ver_major = vmaj;
-                seenPeers[i].ver_minor = vmin;
-                seenPeers[i].ver_rel = vrel;
-                seenPeers[i].ver_dbg = vdbg;
-                seenPeers[i].ver_known = 1;
-            }
-            return;
+            if (slot < 0) slot = i;  // erster freier Slot als Fallback
+        } else if (memcmp(seenPeers[i].mac, mac, 6) == 0) {
+            slot = i;
+            break;
         }
+    }
+    if (slot < 0) return;  // Tabelle voll
+    PeerTracker &p = seenPeers[slot];
+    if (p.lastSeen == 0) {
+        memcpy(p.mac, mac, 6);
+        p.ver_known = 0;
+    }
+    p.lastSeen = now;
+    if (hasVer) {
+        p.ver_major = vmaj;
+        p.ver_minor = vmin;
+        p.ver_rel = vrel;
+        p.ver_dbg = vdbg;
+        p.ver_known = 1;
     }
 }
 
@@ -276,7 +269,6 @@ void setup() {
     for (int i = 0; i < 64; i++) {
         if (heartMask[i / 8][i % 8]) heartMask64 |= (1ULL << i);
     }
-    peerHashInit();
 
     WiFi.mode(WIFI_STA);
     esp_wifi_set_protocol(WIFI_IF_STA, WIFI_PROTOCOL_11G | WIFI_PROTOCOL_11N);
@@ -342,8 +334,7 @@ void loop() {
     for (int i = 0; i < MAX_PEERS; i++) {
         if (seenPeers[i].lastSeen != 0) {
             if (now - seenPeers[i].lastSeen > PEER_TIMEOUT) {
-                seenPeers[i].lastSeen = 0;
-                // Hash-Eintrag bleibt — lastSeen==0 reicht als "frei"-Marker
+                seenPeers[i].lastSeen = 0;  // lastSeen==0 = Slot frei
             } else {
                 uniquePeerCount++;
             }
@@ -486,41 +477,18 @@ void loop() {
 
     // 6. SENDEN (nicht-blockierend geplant für Wave-Rebroadcast)
     if (waveReBroadcastDone && waveReBroadcastAt != 0 && now >= waveReBroadcastAt) {
-        txData.mode = SYNC_MODE_WAVE;
-        txData.virusID = fx[E_WAVE].id;
-        txData.magic_id = MAGIC_ID;
-        txData.beatCounter = heartBeatState;
-        txData.ver_major = FW_VERSION_MAJOR;
-        txData.ver_minor = FW_VERSION_MINOR;
-#if ENABLE_SERIAL_DEBUG
-        txData.ver_rel = FW_VERSION_PATCH;
-        txData.ver_dbg = FW_DEBUG_BUILD;
-#else
-        txData.ver_rel = FW_VERSION_PATCH;
-        txData.ver_dbg = 0;
-#endif
-        esp_err_t err = esp_now_send(broadcastMac, (uint8_t *)&txData, sizeof(txData));
-        if (err != ESP_OK) {
-            // Sendefehler ignorieren — nächster Frame sendet wieder
-        }
+        sendSync(SYNC_MODE_WAVE, fx[E_WAVE].id);
         waveReBroadcastAt = 0;
     }
 
-    txData.mode = activeMode;
-    txData.virusID = activeFxId;
-    txData.magic_id = MAGIC_ID;
-    txData.beatCounter = heartBeatState;
-    txData.ver_major = FW_VERSION_MAJOR;
-    txData.ver_minor = FW_VERSION_MINOR;
-#if ENABLE_SERIAL_DEBUG
-    txData.ver_rel = FW_VERSION_PATCH;
-    txData.ver_dbg = FW_DEBUG_BUILD;
-#else
-    txData.ver_rel = FW_VERSION_PATCH;
-    txData.ver_dbg = 0;
-#endif
-    esp_err_t sendErr = esp_now_send(broadcastMac, (uint8_t *) &txData, sizeof(txData));
-    (void)sendErr; // Fehler ignorieren, kein Retry in dieser Firmware
+    // Gedrosselt auf SYNC_TX_INTERVAL_MS; Effekt-/ID-Wechsel sofort, damit sich
+    // Effekte ohne Verzögerung durch den Schwarm verbreiten.
+    static uint32_t lastTx = 0;
+    if (now - lastTx >= SYNC_TX_INTERVAL_MS ||
+        activeMode != txData.mode || activeFxId != txData.virusID) {
+        sendSync(activeMode, activeFxId);
+        lastTx = now;
+    }
 
     // 7. OUTPUT
     FastLED.setBrightness(currentBright);
