@@ -28,7 +28,7 @@
  */
 #define FW_VERSION_MAJOR 1
 #define FW_VERSION_MINOR   2
-#define FW_VERSION_PATCH   2
+#define FW_VERSION_PATCH   3
 #define FW_DEBUG_BUILD     1  // Nur Debug-Zweig: bei sichtbarem neuen Debug-Stand +1, max 99
 
 #if FW_DEBUG_BUILD < 1 || FW_DEBUG_BUILD > 99
@@ -120,10 +120,14 @@ PeerTracker seenPeers[MAX_PEERS];
 uint8_t uniquePeerCount = 0;
 
 // --- VARIABLEN ---
-volatile float smoothRSSI = -95;   // volatile: wird in ISR (OnDataRecv) geschrieben
+// stateMux schützt alles, was OnDataRecv (WiFi-Task, Core 0) schreibt und loop()
+// (Core 1) liest: seenPeers, smoothRSSI, heartBeatState/beatCatchup, fx[], wave*,
+// ambient*. loop() kopiert einmal pro Frame unter der Sperre und rendert ohne.
+static portMUX_TYPE stateMux = portMUX_INITIALIZER_UNLOCKED;
+float smoothRSSI = -95;
 uint32_t heartBeatState = 0;     // Schwarm-Phase (siehe BEAT_UNITS_PER_PULSE)
 uint32_t beatCatchup = 0;        // noch aufzuholender Vorsprung des schnellsten Peers
-static portMUX_TYPE beatMux = portMUX_INITIALIZER_UNLOCKED;
+static uint32_t frameBeat = 0;   // Snapshot von heartBeatState für den aktuellen Frame
 uint8_t hueOffset = 0;
 uint8_t broadcastMac[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 
@@ -135,6 +139,10 @@ struct EffectState {
 };
 enum EffectIdx : uint8_t { E_VIRUS=0, E_RAINBOW, E_PRIME, E_WAVE, E_BEAT, E_ZONE, E_AMBIENT, E_STROBE, E_COUNT };
 EffectState fx[E_COUNT] = {};
+static const uint32_t fxDurationMs[E_COUNT] = {
+    3000, REMOTE_RAINBOW_MS, REMOTE_PRIME_MS, WAVE_DURATION_MS,
+    BEAT_PULSE_MS, REMOTE_ZONE_MS, REMOTE_AMBIENT_MS, STROBE_DURATION_MS
+};
 
 // Wave-spezifisch
 uint32_t waveDelay = 0;
@@ -172,9 +180,11 @@ static void printFwVersionBanner() {
 static void sendSync(uint8_t mode, uint32_t fxId) {
     txData.magic_id = MAGIC_ID;
     // Ambient: beatCounter trägt die Farbe (0xRRGGBB), sonst den Schwarm-Takt
+    portENTER_CRITICAL(&stateMux);
     txData.beatCounter = (mode == SYNC_MODE_AMBIENT)
         ? ((uint32_t)ambientR << 16) | ((uint32_t)ambientG << 8) | ambientB
         : heartBeatState;
+    portEXIT_CRITICAL(&stateMux);
     txData.virusID = fxId;
     txData.mode = mode;
     txData.ver_major = FW_VERSION_MAJOR;
@@ -192,7 +202,7 @@ static void sendSync(uint8_t mode, uint32_t fxId) {
 // Puls-Helligkeit aus der gemeinsamen Schwarm-Phase (statt beatsin8, das mit dem
 // lokalen millis() rechnet und daher nie zwischen Badges synchron ist).
 static inline uint8_t swarmPulse(uint8_t lowest, uint8_t highest) {
-    return lowest + scale8(sin8((uint8_t)(heartBeatState >> 8)), highest - lowest);
+    return lowest + scale8(sin8((uint8_t)(frameBeat >> 8)), highest - lowest);
 }
 
 // --- HELPER: PRIMZAHL (LUT, O(1)) ---
@@ -202,7 +212,7 @@ static inline bool isPrimeFast(uint8_t n) {
 
 // --- PEER TRACKING: lineare Suche ---
 // Bei MAX_PEERS=25 schneller als jeder Hash und ohne Verwaltungs-Zustand,
-// der beim Wiederbelegen freier Slots inkonsistent werden kann.
+// der beim Wiederbelegen freier Slots inkonsistent werden kann. Aufruf unter stateMux.
 static void trackBadge(const uint8_t* mac, bool hasVer, uint8_t vmaj, uint8_t vmin, uint8_t vrel,
                        uint8_t vdbg) {
     uint32_t now = millis();
@@ -240,23 +250,23 @@ void OnDataRecv(const esp_now_recv_info_t *recv_info, const uint8_t *incomingDat
     memcpy(&rx, incomingData, (size_t)len < sizeof(rx) ? (size_t)len : sizeof(rx));
     const bool hasVer = (len >= (int)sizeof(SyncPacket));
 
+    const float currentRSSI = (float)recv_info->rx_ctrl->rssi;
+    const uint32_t now = millis();
+
+    portENTER_CRITICAL(&stateMux);
     trackBadge(recv_info->src_addr, hasVer, rx.ver_major, rx.ver_minor, rx.ver_rel, rx.ver_dbg);
 
-    float currentRSSI = (float)recv_info->rx_ctrl->rssi;
     smoothRSSI = (0.05f * currentRSSI) + (0.95f * smoothRSSI);
     if (rx.mode != SYNC_MODE_AMBIENT) {  // bei Ambient ist beatCounter eine Farbe
         int32_t ahead = (int32_t)(rx.beatCounter - heartBeatState);
-        portENTER_CRITICAL(&beatMux);
         if (ahead > (int32_t)BEAT_JUMP_THRESHOLD) {
             heartBeatState = rx.beatCounter;
             beatCatchup = 0;
         } else if (ahead > 0 && (uint32_t)ahead > beatCatchup) {
             beatCatchup = (uint32_t)ahead;
         }
-        portEXIT_CRITICAL(&beatMux);
     }
 
-    const uint32_t now = millis();
     #define FX_START(idx, rxid) do { if ((rxid) != fx[idx].id) { fx[idx].id = (rxid); fx[idx].startTime = now; fx[idx].active = true; } } while(0)
 
     if (rx.mode == SYNC_MODE_VIRUS)   FX_START(E_VIRUS,   rx.virusID);
@@ -283,6 +293,7 @@ void OnDataRecv(const esp_now_recv_info_t *recv_info, const uint8_t *incomingDat
     }
     if (rx.mode == SYNC_MODE_STROBE)  FX_START(E_STROBE,  rx.virusID);
     #undef FX_START
+    portEXIT_CRITICAL(&stateMux);
 }
 
 void setup() {
@@ -341,9 +352,12 @@ void loop() {
     }
     if (morseLen > 0 && (now - lastBtnRelease > 800)) {
         if (strcmp(morseBuf, "-.-.") == 0) {
-            fx[E_VIRUS].id = (uint32_t)(esp_random() % 99999) + 1;
+            uint32_t id = (uint32_t)(esp_random() % 99999) + 1;
+            portENTER_CRITICAL(&stateMux);
+            fx[E_VIRUS].id = id;
             fx[E_VIRUS].startTime = now;
             fx[E_VIRUS].active = true;
+            portEXIT_CRITICAL(&stateMux);
 #if ENABLE_SERIAL_DEBUG
             Serial.println("[Morse] Wortende -> VIRUS (-.-.)");
 #endif
@@ -356,6 +370,22 @@ void loop() {
         morseLen = 0;
         morseBuf[0] = '\0';
     }
+
+    // 2.–4. GEMEINSAMER ZUSTAND: aktualisieren + Snapshot für den Frame (unter stateMux)
+    float inputRSSI, norm, power;
+    float rssiSnapshot;
+    static uint32_t lastBeatMs = now;
+    static uint8_t modeBpm = 35;
+    EffectState fs[E_COUNT];
+    uint32_t waveDelayS;
+    bool waveStartRebroadcast;
+    uint8_t ambR, ambG, ambB;
+
+    // Kurz halten: nur Zählen, ein paar float-Operationen und Kopien, keine I/O.
+    portENTER_CRITICAL(&stateMux);
+    // now neu lesen: OnDataRecv kann seit Loop-Beginn lastSeen/startTime auf einen
+    // späteren Wert gesetzt haben, now - x würde sonst überlaufen (Peer/Effekt weg).
+    now = millis();
 
     // 2. PEER COUNT & TIMEOUT CLEANUP
     uniquePeerCount = 0;
@@ -370,37 +400,45 @@ void loop() {
     }
 
     // 3. DYNAMISCHES FADE-OUT
-    float rssiSnapshot;
-    noInterrupts();
-    rssiSnapshot = smoothRSSI;
-    interrupts();
     if (uniquePeerCount == 0) {
-        if (rssiSnapshot > -95) rssiSnapshot -= 0.5f;
+        if (smoothRSSI > -95) smoothRSSI -= 0.5f;
     } else {
-        rssiSnapshot -= 0.01f;
+        smoothRSSI -= 0.01f;
     }
-    if (rssiSnapshot < -95) rssiSnapshot = -95;
-    noInterrupts();
-    smoothRSSI = rssiSnapshot;
-    interrupts();
+    if (smoothRSSI < -95) smoothRSSI = -95;
+    rssiSnapshot = smoothRSSI;
 
-    // 4. RSSI MAPPING
-    float inputRSSI = constrain(rssiSnapshot, -95, -45);
-    float norm = (inputRSSI - (-95)) / 50.0f;
-    float power = norm * norm;
-    uint8_t currentBright = BRIGHT_MIN + (uint8_t)(power * (BRIGHT_MAX - BRIGHT_MIN));
-    // Takt fortschreiben: Modus-Tempo des letzten Frames + RSSI-Anteil (Nähe = schneller)
-    static uint32_t lastBeatMs = now;
-    static uint8_t modeBpm = 35;
-    float bpm = modeBpm + 23.4f + 117.2f * power;
-    uint32_t beatStep = (uint32_t)(bpm * (float)(now - lastBeatMs) * (BEAT_UNITS_PER_PULSE / 60000.0f));
+    // 4. RSSI MAPPING + Takt fortschreiben: Modus-Tempo des letzten Frames + RSSI-Anteil
+    inputRSSI = constrain(rssiSnapshot, -95, -45);
+    norm = (inputRSSI - (-95)) / 50.0f;
+    power = norm * norm;
+    {
+        float bpm = modeBpm + 23.4f + 117.2f * power;
+        uint32_t beatStep = (uint32_t)(bpm * (float)(now - lastBeatMs) * (BEAT_UNITS_PER_PULSE / 60000.0f));
+        uint32_t catchStep = beatCatchup ? beatCatchup / 4 + 1 : 0;
+        if (catchStep > beatCatchup) catchStep = beatCatchup;
+        beatCatchup -= catchStep;
+        heartBeatState += beatStep + catchStep;
+    }
     lastBeatMs = now;
-    portENTER_CRITICAL(&beatMux);
-    uint32_t catchStep = beatCatchup ? beatCatchup / 4 + 1 : 0;
-    if (catchStep > beatCatchup) catchStep = beatCatchup;
-    beatCatchup -= catchStep;
-    heartBeatState += beatStep + catchStep;
-    portEXIT_CRITICAL(&beatMux);
+    frameBeat = heartBeatState;
+
+    // Abgelaufene Effekte deaktivieren, Snapshot für das Rendern
+    for (int i = 0; i < E_COUNT; i++) {
+        if (fx[i].active && now - fx[i].startTime >= fxDurationMs[i]) fx[i].active = false;
+        fs[i] = fx[i];
+    }
+    waveDelayS = waveDelay;
+    ambR = ambientR; ambG = ambientG; ambB = ambientB;
+    // Wave-Rebroadcast einmal pro Welle einplanen, sobald unser Puls dran ist
+    waveStartRebroadcast = fs[E_WAVE].active && !waveReBroadcastDone &&
+                           now - fs[E_WAVE].startTime >= waveDelay;
+    if (waveStartRebroadcast) waveReBroadcastDone = true;
+
+    portEXIT_CRITICAL(&stateMux);
+
+    if (waveStartRebroadcast) waveReBroadcastAt = now + random(5, 25);
+    uint8_t currentBright = BRIGHT_MIN + (uint8_t)(power * (BRIGHT_MAX - BRIGHT_MIN));
 
     // 5. ANIMATIONS-WEICHE
     FastLED.clear();
@@ -408,34 +446,34 @@ void loop() {
     uint8_t activeMode = 0;      // für txData.mode
     uint32_t activeFxId = 0;     // für txData.virusID
 
-    if (fx[E_VIRUS].active && (now - fx[E_VIRUS].startTime < 3000)) {
+    if (fs[E_VIRUS].active && (now - fs[E_VIRUS].startTime < 3000)) {
         // MORSE / REMOTE VIRUS BLITZ
-        uint32_t flash = (now - fx[E_VIRUS].startTime) % 300;
+        uint32_t flash = (now - fs[E_VIRUS].startTime) % 300;
         if (flash < 150) fill_solid(leds, NUM_LEDS, CRGB::White);
         activeMode = SYNC_MODE_VIRUS;
-        activeFxId = fx[E_VIRUS].id;
+        activeFxId = fs[E_VIRUS].id;
     }
-    else if (fx[E_RAINBOW].active && (now - fx[E_RAINBOW].startTime < REMOTE_RAINBOW_MS)) {
+    else if (fs[E_RAINBOW].active && (now - fs[E_RAINBOW].startTime < REMOTE_RAINBOW_MS)) {
         hueOffset += 5;
         modeBpm = 100;
         pulse = swarmPulse(150, 255);
         for (int i = 0; i < NUM_LEDS; i++) leds[i] = CHSV(hueOffset + (i*3), 255, pulse);
         activeMode = SYNC_MODE_RAINBOW;
-        activeFxId = fx[E_RAINBOW].id;
+        activeFxId = fs[E_RAINBOW].id;
     }
-    else if (fx[E_PRIME].active && (now - fx[E_PRIME].startTime < REMOTE_PRIME_MS)) {
+    else if (fs[E_PRIME].active && (now - fs[E_PRIME].startTime < REMOTE_PRIME_MS)) {
         modeBpm = 80;
         pulse = swarmPulse(120, 255);
         fill_solid(leds, NUM_LEDS, heartColor);
         nscale8(leds, NUM_LEDS, pulse);
         if (random8() > 210) leds[random8(64)] = CRGB::White;
         activeMode = SYNC_MODE_PRIME;
-        activeFxId = fx[E_PRIME].id;
+        activeFxId = fs[E_PRIME].id;
     }
-    else if (fx[E_WAVE].active && (now - fx[E_WAVE].startTime < WAVE_DURATION_MS)) {
-        uint32_t elapsed = now - fx[E_WAVE].startTime;
-        if (elapsed >= waveDelay && elapsed < waveDelay + WAVE_PULSE_MS) {
-            uint32_t pulseElapsed = elapsed - waveDelay;
+    else if (fs[E_WAVE].active && (now - fs[E_WAVE].startTime < WAVE_DURATION_MS)) {
+        uint32_t elapsed = now - fs[E_WAVE].startTime;
+        if (elapsed >= waveDelayS && elapsed < waveDelayS + WAVE_PULSE_MS) {
+            uint32_t pulseElapsed = elapsed - waveDelayS;
             uint8_t brightness;
             if (pulseElapsed < 200) {
                 brightness = (uint8_t)((pulseElapsed * 255) / 200);
@@ -448,14 +486,10 @@ void loop() {
             nscale8(leds, NUM_LEDS, brightness);
         }
         activeMode = SYNC_MODE_WAVE;
-        activeFxId = fx[E_WAVE].id;
-        if (!waveReBroadcastDone && elapsed >= waveDelay) {
-            waveReBroadcastDone = true;
-            waveReBroadcastAt = now + random(5, 25);
-        }
+        activeFxId = fs[E_WAVE].id;
     }
-    else if (fx[E_BEAT].active && (now - fx[E_BEAT].startTime < BEAT_PULSE_MS)) {
-        uint32_t elapsed = now - fx[E_BEAT].startTime;
+    else if (fs[E_BEAT].active && (now - fs[E_BEAT].startTime < BEAT_PULSE_MS)) {
+        uint32_t elapsed = now - fs[E_BEAT].startTime;
         uint8_t brightness;
         if (elapsed < BEAT_PULSE_MS / 2) {
             brightness = (uint8_t)((elapsed * 255) / (BEAT_PULSE_MS / 2));
@@ -465,9 +499,9 @@ void loop() {
         fill_solid(leds, NUM_LEDS, CRGB::White);
         nscale8(leds, NUM_LEDS, brightness);
         activeMode = SYNC_MODE_BEAT;
-        activeFxId = fx[E_BEAT].id;
+        activeFxId = fs[E_BEAT].id;
     }
-    else if (fx[E_ZONE].active && (now - fx[E_ZONE].startTime < REMOTE_ZONE_MS)) {
+    else if (fs[E_ZONE].active && (now - fs[E_ZONE].startTime < REMOTE_ZONE_MS)) {
         CRGB zoneColor;
         if (rssiSnapshot > -55) zoneColor = ZONE0_COLOR;
         else if (rssiSnapshot > -75) zoneColor = ZONE1_COLOR;
@@ -477,20 +511,20 @@ void loop() {
         fill_solid(leds, NUM_LEDS, zoneColor);
         nscale8(leds, NUM_LEDS, pulse);
         activeMode = SYNC_MODE_ZONE;
-        activeFxId = fx[E_ZONE].id;
+        activeFxId = fs[E_ZONE].id;
     }
-    else if (fx[E_AMBIENT].active && (now - fx[E_AMBIENT].startTime < REMOTE_AMBIENT_MS)) {
-        fill_solid(leds, NUM_LEDS, CRGB(ambientR, ambientG, ambientB));
+    else if (fs[E_AMBIENT].active && (now - fs[E_AMBIENT].startTime < REMOTE_AMBIENT_MS)) {
+        fill_solid(leds, NUM_LEDS, CRGB(ambR, ambG, ambB));
         activeMode = SYNC_MODE_AMBIENT;
-        activeFxId = fx[E_AMBIENT].id;
+        activeFxId = fs[E_AMBIENT].id;
     }
-    else if (fx[E_STROBE].active && (now - fx[E_STROBE].startTime < STROBE_DURATION_MS)) {
-        uint32_t elapsed = now - fx[E_STROBE].startTime;
+    else if (fs[E_STROBE].active && (now - fs[E_STROBE].startTime < STROBE_DURATION_MS)) {
+        uint32_t elapsed = now - fs[E_STROBE].startTime;
         if ((elapsed / STROBE_FLASH_MS) % 2 == 0) {
             fill_solid(leds, NUM_LEDS, CRGB::White);
         }
         activeMode = SYNC_MODE_STROBE;
-        activeFxId = fx[E_STROBE].id;
+        activeFxId = fs[E_STROBE].id;
     }
     else if (uniquePeerCount + 1 >= 17) {
         // THE SINGULARITY
@@ -501,8 +535,6 @@ void loop() {
         activeMode = 0;
     }
     else {
-        // Effekte zurücksetzen (nur wenn keiner aktiv)
-        for (int i = 0; i < E_COUNT; i++) fx[i].active = false;
         uint8_t totalDevices = uniquePeerCount + 1;
         bool prime = isPrimeFast(totalDevices);
         modeBpm = prime ? 80 : 35 + (uint8_t)(power * 55);
@@ -519,8 +551,8 @@ void loop() {
     }
 
     // 6. SENDEN (nicht-blockierend geplant für Wave-Rebroadcast)
-    if (waveReBroadcastDone && waveReBroadcastAt != 0 && now >= waveReBroadcastAt) {
-        sendSync(SYNC_MODE_WAVE, fx[E_WAVE].id);
+    if (waveReBroadcastAt != 0 && (int32_t)(now - waveReBroadcastAt) >= 0) {
+        sendSync(SYNC_MODE_WAVE, fs[E_WAVE].id);
         waveReBroadcastAt = 0;
     }
 
@@ -547,16 +579,20 @@ void loop() {
                          "Status | FW %u.%u.%02u+debug | Peers: %d | RSSI: %.1f | Bright: %d | Morse: \"%s\" | remote",
                          FW_VERSION_MAJOR, FW_VERSION_MINOR, FW_DEBUG_BUILD,
                          uniquePeerCount, rssiSnapshot, currentBright, morseBuf);
+        static PeerTracker peerCopy[MAX_PEERS];
+        portENTER_CRITICAL(&stateMux);
+        memcpy(peerCopy, seenPeers, sizeof(peerCopy));
+        portEXIT_CRITICAL(&stateMux);
         int listed = 0;
         for (int i = 0; i < MAX_PEERS && n < (int)sizeof(line) - 12 && listed < 10; i++) {
-            if (seenPeers[i].lastSeen == 0) continue;
-            if (seenPeers[i].ver_known) {
-                if (seenPeers[i].ver_dbg) {
+            if (peerCopy[i].lastSeen == 0) continue;
+            if (peerCopy[i].ver_known) {
+                if (peerCopy[i].ver_dbg) {
                     n += snprintf(line + n, sizeof(line) - (size_t)n, " %u.%u.%02u+",
-                                  seenPeers[i].ver_major, seenPeers[i].ver_minor, seenPeers[i].ver_dbg);
+                                  peerCopy[i].ver_major, peerCopy[i].ver_minor, peerCopy[i].ver_dbg);
                 } else {
                     n += snprintf(line + n, sizeof(line) - (size_t)n, " %u.%u.%u",
-                                  seenPeers[i].ver_major, seenPeers[i].ver_minor, seenPeers[i].ver_rel);
+                                  peerCopy[i].ver_major, peerCopy[i].ver_minor, peerCopy[i].ver_rel);
                 }
             } else {
                 n += snprintf(line + n, sizeof(line) - (size_t)n, " ?");

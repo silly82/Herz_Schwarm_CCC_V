@@ -45,7 +45,7 @@
 
 #define BASESTATION_FW_MAJOR 0
 #define BASESTATION_FW_MINOR     2
-#define BASESTATION_FW_PATCH     1
+#define BASESTATION_FW_PATCH     2
 
 #define MQTT_NS "hs_mqtt"
 #define MQTT_HOST_DEF    "192.168.1.10"
@@ -158,11 +158,18 @@ static void onNetworkEvent(arduino_event_id_t event, arduino_event_info_t info) 
     }
 }
 
-static int countActivePeers(uint32_t now) {
+// Kopiert die aktiven Peers unter peerMux nach out[] und liefert ihre Anzahl.
+// Formatiert wird danach ohne Sperre (snprintf mit gesperrten Interrupts vermeiden).
+// *nowOut wird unter der Sperre gelesen, damit kein lastSeen "in der Zukunft" liegt.
+static int snapshotActivePeers(PeerEntry *out, uint32_t *nowOut) {
     int n = 0;
+    portENTER_CRITICAL(&peerMux);
+    uint32_t now = millis();
     for (int i = 0; i < MAX_PEERS; i++) {
-        if (peers[i].in_use && (now - peers[i].lastSeen) <= PEER_TIMEOUT_MS) n++;
+        if (peers[i].in_use && (now - peers[i].lastSeen) <= PEER_TIMEOUT_MS) out[n++] = peers[i];
     }
+    portEXIT_CRITICAL(&peerMux);
+    *nowOut = now;
     return n;
 }
 
@@ -205,8 +212,9 @@ static void updatePeer(const uint8_t *mac, int8_t rssi, bool hasVer,
     portEXIT_CRITICAL(&peerMux);
 }
 
-static void purgeStalePeers(uint32_t now) {
+static void purgeStalePeers() {
     portENTER_CRITICAL(&peerMux);
+    uint32_t now = millis();  // unter der Sperre: OnDataRecv kann lastSeen sonst "nach" now setzen
     for (int i = 0; i < MAX_PEERS; i++) {
         if (peers[i].in_use && (now - peers[i].lastSeen) > PEER_TIMEOUT_MS) {
             peers[i].in_use = 0;
@@ -366,22 +374,19 @@ static void mqttTryConnect() {
 
 static void mqttPublishStatus() {
     if (!mqtt.connected()) return;
-    uint32_t now = millis();
+    static PeerEntry snap[MAX_PEERS];
+    uint32_t now;
+    int n = snapshotActivePeers(snap, &now);
     char json[MQTT_STATUS_JSON_LEN];
     size_t o = 0;
-    o += snprintf(json + o, sizeof(json) - o, "{\"n\":%d,\"peers\":[", countActivePeers(now));
-    bool first = true;
-    portENTER_CRITICAL(&peerMux);
-    for (int i = 0; i < MAX_PEERS; i++) {
-        if (!peers[i].in_use || (now - peers[i].lastSeen) > PEER_TIMEOUT_MS) continue;
-        if (!first) o += snprintf(json + o, sizeof(json) - o, ",");
-        first = false;
+    o += snprintf(json + o, sizeof(json) - o, "{\"n\":%d,\"peers\":[", n);
+    for (int i = 0; i < n; i++) {
+        if (i) o += snprintf(json + o, sizeof(json) - o, ",");
         o += snprintf(json + o, sizeof(json) - o, "{\"mac\":\"");
-        appendMac(json, sizeof(json), &o, peers[i].mac);
-        o += snprintf(json + o, sizeof(json) - o, "\",\"rssi\":%d}", peers[i].rssi);
+        appendMac(json, sizeof(json), &o, snap[i].mac);
+        o += snprintf(json + o, sizeof(json) - o, "\",\"rssi\":%d}", snap[i].rssi);
         if (o >= sizeof(json) - 32) break;
     }
-    portEXIT_CRITICAL(&peerMux);
     o += snprintf(json + o, sizeof(json) - o, "]}");
     if (!mqtt.publish(mqttCfg.topicStatus, json)) {
         Serial.printf("MQTT publish fehlgeschlagen (%u Byte)\n", (unsigned)o);
@@ -646,7 +651,9 @@ setInterval(load,1500);load();loadMqtt(false);
 }
 
 static void handleApiPeersTable() {
-    uint32_t now = millis();
+    static PeerEntry snap[MAX_PEERS];
+    uint32_t now;
+    int n = snapshotActivePeers(snap, &now);
     char json[3072];
     size_t o = 0;
     o += snprintf(json + o, sizeof(json) - o,
@@ -654,36 +661,32 @@ static void handleApiPeersTable() {
                   BASESTATION_FW_MAJOR, BASESTATION_FW_MINOR, BASESTATION_FW_PATCH,
                   mqttCfg.enabled ? "true" : "false",
                   (mqttCfg.enabled && mqtt.connected()) ? "true" : "false",
-                  countActivePeers(now));
+                  n);
 
-    bool first = true;
-    portENTER_CRITICAL(&peerMux);
-    for (int i = 0; i < MAX_PEERS; i++) {
-        if (!peers[i].in_use || (now - peers[i].lastSeen) > PEER_TIMEOUT_MS) continue;
-        if (!first) o += snprintf(json + o, sizeof(json) - o, ",");
-        first = false;
-        uint32_t age = now - peers[i].lastSeen;
+    for (int i = 0; i < n; i++) {
+        const PeerEntry &p = snap[i];
+        if (i) o += snprintf(json + o, sizeof(json) - o, ",");
+        uint32_t age = now - p.lastSeen;
         o += snprintf(json + o, sizeof(json) - o, "{\"mac\":\"");
-        appendMac(json, sizeof(json), &o, peers[i].mac);
-        if (peers[i].ver_known) {
-            if (peers[i].ver_dbg) {
+        appendMac(json, sizeof(json), &o, p.mac);
+        if (p.ver_known) {
+            if (p.ver_dbg) {
                 o += snprintf(json + o, sizeof(json) - o,
                               "\",\"rssi\":%d,\"fw\":\"%u.%u.%02u+\",\"age_ms\":%lu}",
-                              peers[i].rssi, peers[i].ver_major, peers[i].ver_minor, peers[i].ver_dbg,
+                              p.rssi, p.ver_major, p.ver_minor, p.ver_dbg,
                               (unsigned long)age);
             } else {
                 o += snprintf(json + o, sizeof(json) - o,
                               "\",\"rssi\":%d,\"fw\":\"%u.%u.%u\",\"age_ms\":%lu}",
-                              peers[i].rssi, peers[i].ver_major, peers[i].ver_minor, peers[i].ver_rel,
+                              p.rssi, p.ver_major, p.ver_minor, p.ver_rel,
                               (unsigned long)age);
             }
         } else {
             o += snprintf(json + o, sizeof(json) - o, "\",\"rssi\":%d,\"fw\":null,\"age_ms\":%lu}",
-                          peers[i].rssi, (unsigned long)age);
+                          p.rssi, (unsigned long)age);
         }
         if (o >= sizeof(json) - 64) break;
     }
-    portEXIT_CRITICAL(&peerMux);
     o += snprintf(json + o, sizeof(json) - o, "]}");
     server.send(200, "application/json", json);
 }
@@ -756,7 +759,7 @@ void setup() {
 
 void loop() {
     uint32_t now = millis();
-    purgeStalePeers(now);
+    purgeStalePeers();
     server.handleClient();
 
     if (ethGotIp) {

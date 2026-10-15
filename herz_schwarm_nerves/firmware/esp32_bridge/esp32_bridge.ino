@@ -27,7 +27,7 @@
  *   STATION_STALE_MS nichts gesendet haben, gelten als offline und
  *   blockieren keine Retries mehr.
  *
- * Benötigt: ArduinoJson Library (Library Manager: "ArduinoJson" by Benoit Blanchon)
+ * Benötigt: ArduinoJson >= 7 (Library Manager: "ArduinoJson" by Benoit Blanchon)
  */
 
 #include <Arduino.h>
@@ -40,7 +40,7 @@
 #define MAGIC_ID        0x421337CC
 #define BRIDGE_FW_MAJOR 0
 #define BRIDGE_FW_MINOR 1
-#define BRIDGE_FW_PATCH 4
+#define BRIDGE_FW_PATCH 5
 
 #define MAX_JSON_LEN    256
 #define SERIAL_BAUD     115200
@@ -95,21 +95,21 @@ static void sendJson(const JsonDocument &doc) {
 }
 
 static void sendAck(uint32_t seq) {
-    StaticJsonDocument<64> doc;
+    JsonDocument doc;
     doc["evt"] = "ack";
     doc["seq"] = seq;
     sendJson(doc);
 }
 
 static void sendError(const char *msg) {
-    StaticJsonDocument<128> doc;
+    JsonDocument doc;
     doc["evt"] = "err";
     doc["msg"] = msg;
     sendJson(doc);
 }
 
 static void sendLog(const char *msg) {
-    StaticJsonDocument<128> doc;
+    JsonDocument doc;
     doc["evt"] = "log";
     doc["msg"] = msg;
     sendJson(doc);
@@ -200,7 +200,7 @@ static void onDataRecv(const esp_now_recv_info_t *info, const uint8_t *data, int
 }
 
 static void sendPong() {
-    StaticJsonDocument<128> doc;
+    JsonDocument doc;
     doc["evt"] = "pong";
     portENTER_CRITICAL(&stationMux);
     int alive = countAliveStations();
@@ -212,7 +212,7 @@ static void sendPong() {
 }
 
 static void handleCommand(const char *json) {
-    StaticJsonDocument<256> doc;
+    JsonDocument doc;
     DeserializationError err = deserializeJson(doc, json);
     if (err) {
         sendError(err.c_str());
@@ -253,7 +253,7 @@ static void handleCommand(const char *json) {
             portEXIT_CRITICAL(&stationMux);
             sendAck(seq);
         } else {
-            StaticJsonDocument<128> e;
+            JsonDocument e;
             e["evt"] = "err";
             e["seq"] = seq;
             e["msg"] = "esp_now_send failed";
@@ -299,7 +299,7 @@ void loop() {
         char c = Serial.read();
         if (c == '\r') {
             continue; // Windows CRLF: skip CR, let LF trigger
-        } else if (c == '\n' || c == '\r') {
+        } else if (c == '\n') {
             if (linePos > 0) {
                 lineBuf[linePos] = '\0';
                 handleCommand(lineBuf);
