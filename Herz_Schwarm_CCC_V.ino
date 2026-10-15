@@ -27,8 +27,8 @@
  *              Commits seit 1.2.0 (oder seit letztem A.B.C-Wechsel).
  */
 #define FW_VERSION_MAJOR 1
-#define FW_VERSION_MINOR   2
-#define FW_VERSION_PATCH   3
+#define FW_VERSION_MINOR   3
+#define FW_VERSION_PATCH   0
 #define FW_DEBUG_BUILD     1  // Nur Debug-Zweig: bei sichtbarem neuen Debug-Stand +1, max 99
 
 #if FW_DEBUG_BUILD < 1 || FW_DEBUG_BUILD > 99
@@ -64,6 +64,7 @@
 #define SYNC_MODE_ZONE     6  // RSSI-Zonen-Farben
 #define SYNC_MODE_AMBIENT  7  // Feste Farbe (alle LEDs)
 #define SYNC_MODE_STROBE   8  // Strobe-Blitz
+#define SYNC_MODE_IDENTIFY 9  // "Badge finden": nur das Badge mit der Ziel-MAC blinkt grün
 #define REMOTE_RAINBOW_MS  15000
 #define REMOTE_PRIME_MS    12000
 #define WAVE_DURATION_MS   4000
@@ -73,6 +74,8 @@
 #define REMOTE_AMBIENT_MS  30000
 #define STROBE_DURATION_MS 2000
 #define STROBE_FLASH_MS    80
+#define IDENTIFY_MS        10000
+#define IDENTIFY_BLINK_MS  125
 
 // Zone colors (compile-time, per badge firmware)
 #define ZONE0_COLOR  CRGB(255, 50, 50)   // Nah (RSSI > -55): rot
@@ -85,6 +88,9 @@
 // D (Git-Build-Nummer) wird NICHT per Funk gesendet, nur in Git-Tags gefuehrt (Platz + Kabel-Last).
 // ver_rel = PATCH bei Release (ver_dbg==0); ver_dbg 1…99 = Debug-Build (+debug), 0 = Release-Binary.
 #define SYNC_PACKET_LEGACY_LEN 13
+// Identify-Pakete hängen 6 Byte Ziel-MAC an das SyncPacket an (17 + 6 = 23 Byte).
+// Ältere Firmware liest nur sizeof(SyncPacket) und kennt Modus 9 nicht → ignoriert.
+#define IDENTIFY_PACKET_LEN (sizeof(SyncPacket) + 6)
 
 struct __attribute__((packed)) SyncPacket {
     uint32_t magic_id;
@@ -130,6 +136,7 @@ uint32_t beatCatchup = 0;        // noch aufzuholender Vorsprung des schnellsten
 static uint32_t frameBeat = 0;   // Snapshot von heartBeatState für den aktuellen Frame
 uint8_t hueOffset = 0;
 uint8_t broadcastMac[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+static uint8_t ownMac[6] = {0};  // eigene STA-MAC, Ziel-Vergleich für SYNC_MODE_IDENTIFY
 
 // Effect-State-Struct: ersetzt 8× copy-paste Variablen
 struct EffectState {
@@ -137,11 +144,11 @@ struct EffectState {
     uint32_t startTime;
     bool active;
 };
-enum EffectIdx : uint8_t { E_VIRUS=0, E_RAINBOW, E_PRIME, E_WAVE, E_BEAT, E_ZONE, E_AMBIENT, E_STROBE, E_COUNT };
+enum EffectIdx : uint8_t { E_VIRUS=0, E_RAINBOW, E_PRIME, E_WAVE, E_BEAT, E_ZONE, E_AMBIENT, E_STROBE, E_IDENTIFY, E_COUNT };
 EffectState fx[E_COUNT] = {};
 static const uint32_t fxDurationMs[E_COUNT] = {
     3000, REMOTE_RAINBOW_MS, REMOTE_PRIME_MS, WAVE_DURATION_MS,
-    BEAT_PULSE_MS, REMOTE_ZONE_MS, REMOTE_AMBIENT_MS, STROBE_DURATION_MS
+    BEAT_PULSE_MS, REMOTE_ZONE_MS, REMOTE_AMBIENT_MS, STROBE_DURATION_MS, IDENTIFY_MS
 };
 
 // Wave-spezifisch
@@ -257,7 +264,11 @@ void OnDataRecv(const esp_now_recv_info_t *recv_info, const uint8_t *incomingDat
     trackBadge(recv_info->src_addr, hasVer, rx.ver_major, rx.ver_minor, rx.ver_rel, rx.ver_dbg);
 
     smoothRSSI = (0.05f * currentRSSI) + (0.95f * smoothRSSI);
-    if (rx.mode != SYNC_MODE_AMBIENT) {  // bei Ambient ist beatCounter eine Farbe
+    // Takt nur von Badges übernehmen: Stationen (Basisstation/Bridge, FW-Major 0)
+    // senden ihr millis() als beatCounter, das würde den Schwarm bei jedem Effekt
+    // in der Phase springen lassen. Bei Ambient ist beatCounter eine Farbe.
+    const bool fromStation = hasVer && rx.ver_major == 0;
+    if (rx.mode != SYNC_MODE_AMBIENT && !fromStation) {
         int32_t ahead = (int32_t)(rx.beatCounter - heartBeatState);
         if (ahead > (int32_t)BEAT_JUMP_THRESHOLD) {
             heartBeatState = rx.beatCounter;
@@ -292,6 +303,10 @@ void OnDataRecv(const esp_now_recv_info_t *recv_info, const uint8_t *incomingDat
         ambientB = rx.beatCounter & 0xFF;
     }
     if (rx.mode == SYNC_MODE_STROBE)  FX_START(E_STROBE,  rx.virusID);
+    if (rx.mode == SYNC_MODE_IDENTIFY && len >= (int)IDENTIFY_PACKET_LEN &&
+        memcmp(incomingData + sizeof(SyncPacket), ownMac, 6) == 0) {
+        FX_START(E_IDENTIFY, rx.virusID);
+    }
     #undef FX_START
     portEXIT_CRITICAL(&stateMux);
 }
@@ -309,6 +324,7 @@ void setup() {
     }
 
     WiFi.mode(WIFI_STA);
+    esp_wifi_get_mac(WIFI_IF_STA, ownMac);
     // 11B ist Pflicht: ESP-IDF 5.x lehnt G|N ohne B mit ESP_ERR_INVALID_ARG ab.
     esp_wifi_set_protocol(WIFI_IF_STA, WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G | WIFI_PROTOCOL_11N);
     esp_wifi_set_channel(CCC_CHANNEL, WIFI_SECOND_CHAN_NONE);
@@ -446,7 +462,17 @@ void loop() {
     uint8_t activeMode = 0;      // für txData.mode
     uint32_t activeFxId = 0;     // für txData.virusID
 
-    if (fs[E_VIRUS].active && (now - fs[E_VIRUS].startTime < 3000)) {
+    bool identifying = false;
+    if (fs[E_IDENTIFY].active && (now - fs[E_IDENTIFY].startTime < IDENTIFY_MS)) {
+        // BADGE FINDEN: grünes Blinken, volle Helligkeit (siehe currentBright unten)
+        if (((now - fs[E_IDENTIFY].startTime) / IDENTIFY_BLINK_MS) % 2 == 0) {
+            fill_solid(leds, NUM_LEDS, CRGB::Green);
+        }
+        identifying = true;
+        activeMode = SYNC_MODE_IDENTIFY;
+        activeFxId = fs[E_IDENTIFY].id;
+    }
+    else if (fs[E_VIRUS].active && (now - fs[E_VIRUS].startTime < 3000)) {
         // MORSE / REMOTE VIRUS BLITZ
         uint32_t flash = (now - fs[E_VIRUS].startTime) % 300;
         if (flash < 150) fill_solid(leds, NUM_LEDS, CRGB::White);
@@ -566,7 +592,7 @@ void loop() {
     }
 
     // 7. OUTPUT
-    FastLED.setBrightness(currentBright);
+    FastLED.setBrightness(identifying ? BRIGHT_MAX : currentBright);
     FastLED.show();
 
 #if ENABLE_SERIAL_DEBUG

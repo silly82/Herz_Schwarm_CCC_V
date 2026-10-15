@@ -6,6 +6,7 @@
  * - Optional: Effekt-Broadcast (SyncPacket mode 1–8, siehe README "mode-Werte").
  * - Web-UI + JSON-API unter http://herz-base.local (mDNS); MQTT optional,
  *   Broker/Zugangsdaten/Topics per Web-UI (NVS).
+ * - "Badge finden" (Modus 9, Ziel-MAC) und OTA-Update per Web-UI (Passwort, s. u.).
  *
  * Pinbelegung W5500 laut Spotpear-Wiki: SCK 13, MISO 12, MOSI 11, CS 14, RST 9, INT 10
  */
@@ -22,6 +23,21 @@
 #include <NetworkClient.h>
 #include <PubSubClient.h>
 #include <ESPmDNS.h>
+#include <Update.h>
+
+// OTA-Passwort ist fest einkompiliert. Das Repo ist öffentlich und enthält nur den
+// Platzhalter; das echte Passwort in ota_secret.h (gitignored, Vorlage:
+// ota_secret.h.example) definieren:  #define OTA_PASSWORD "..."
+#if __has_include("ota_secret.h")
+#include "ota_secret.h"
+#endif
+#ifndef OTA_PASSWORD
+#define OTA_PASSWORD "herzschwarm"
+#define OTA_PASSWORD_IS_DEFAULT 1
+#else
+#define OTA_PASSWORD_IS_DEFAULT 0
+#endif
+#define OTA_USER "admin"
 
 // --- Konfiguration Ethernet (Spotpear ESP32-S3-ETH) ---
 #define ETH_PHY_TYPE   ETH_PHY_W5500
@@ -41,11 +57,13 @@
 #define SYNC_PACKET_LEGACY_LEN 13
 #define SYNC_MODE_MAX        8   // Badge-FW kennt Modi 1..8
 #define SYNC_MODE_AMBIENT    7   // Farbe als 0xRRGGBB im beatCounter
+#define SYNC_MODE_IDENTIFY   9   // "Badge finden": SyncPacket + 6 Byte Ziel-MAC
+#define IDENTIFY_REPEATS     3   // Funk ist verlustbehaftet; Badge dedupliziert per virusID
 #define HOSTNAME             "herz-base"
 
 #define BASESTATION_FW_MAJOR 0
-#define BASESTATION_FW_MINOR     2
-#define BASESTATION_FW_PATCH     2
+#define BASESTATION_FW_MINOR     3
+#define BASESTATION_FW_PATCH     0
 
 #define MQTT_NS "hs_mqtt"
 #define MQTT_HOST_DEF    "192.168.1.10"
@@ -103,6 +121,7 @@ static PubSubClient mqtt(mqttNet);
 static uint32_t lastMqttPublish = 0;
 
 static void sendEffectBroadcast(uint8_t mode, uint32_t beatCounter);
+static bool sendIdentify(const uint8_t *mac);
 static void loadMqttConfig();
 static bool resolveMqttBroker(IPAddress &out);
 static void mqttCallback(char *topic, byte *payload, unsigned int len);
@@ -119,7 +138,9 @@ static void applyEspNowRadio() {
     if (err != ESP_OK) {
         Serial.printf("esp_wifi_set_channel fehlgeschlagen: %d\n", (int)err);
     }
-    esp_wifi_set_max_tx_power(52);
+    // Maximum (84 = 21 dBm, Einheit 0,25 dBm): keine LEDs, keine Hitze-Grenze wie beim
+    // Badge (dort 52 = 13 dBm) → Effekte erreichen auch weit entfernte Badges.
+    esp_wifi_set_max_tx_power(84);
     WiFi.setSleep(false);
     esp_wifi_set_ps(WIFI_PS_NONE);
     uint8_t prim = 0;
@@ -485,7 +506,8 @@ h1{font-size:1.45rem;font-weight:700;margin:0;letter-spacing:-.02em;}
 .amb{display:inline-flex;align-items:center;gap:.35rem}
 .amb input[type=color]{width:2.6rem;height:2.4rem;border:1px solid var(--bd);border-radius:8px;background:#12121a;padding:2px;cursor:pointer}
 .warn{font-size:.78rem;color:var(--warn);margin:.6rem 0 0}
-#msg,#mqmsg{min-height:1.4rem;font-size:.88rem;color:var(--cyan);margin:.5rem 0 0;}
+.btn-find{padding:.35rem .7rem;font-size:.8rem;background:linear-gradient(135deg,#22c55e,#15803d);box-shadow:0 2px 10px rgba(34,197,94,.3)}
+#msg,#mqmsg,#otamsg{min-height:1.4rem;font-size:.88rem;color:var(--cyan);margin:.5rem 0 0;}
 .form-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:.85rem;margin:.5rem 0 1rem;}
 .form-grid label{display:flex;flex-direction:column;gap:.35rem;font-size:.78rem;color:var(--muted)}
 .inp,.form-grid input[type=text],.form-grid input[type=password],.form-grid input[type=number]{
@@ -553,10 +575,25 @@ footer code{background:#12121a;padding:.12rem .35rem;border-radius:6px;border:1p
 <div class="card">
 <h2>&#x1F4BB; Badges in der N&auml;he</h2>
 <div id="empty" class="empty" style="display:none"><span class="ico">&#x1F440;</span>Keine Badges in ESP-NOW-Reichweite (Kanal 13)<br><small>Abstand &amp; Antenne pr&uuml;fen &#x1F50D;</small></div>
-<table id="tbl"><thead><tr><th>&#x1F4CD; MAC</th><th>&#x1F4F6; RSSI</th><th>&#x1F4E6; Firmware</th><th>&#x23F1;&#xFE0F; &Delta; ms</th></tr></thead><tbody id="tb"></tbody></table>
+<table id="tbl"><thead><tr><th>&#x1F4CD; MAC</th><th>&#x1F4F6; RSSI</th><th>&#x1F4E6; Firmware</th><th>&#x23F1;&#xFE0F; &Delta; ms</th><th></th></tr></thead><tbody id="tb"></tbody></table>
+<p style="margin:.6rem 0 0;color:var(--muted);font-size:.8rem">&#x1F50E; <b>Finden</b>: das Badge blinkt 10&nbsp;s gr&uuml;n mit voller Helligkeit (Badge-FW &ge; 1.3). Mit dem RSSI-Wert hei&szlig;/kalt suchen.</p>
+<p id="findmsg" style="min-height:1.2rem;font-size:.85rem;margin:.4rem 0 0"></p>
+</div>
+<div class="card">
+<h2>&#x2B06;&#xFE0F; Firmware-Update (OTA)</h2>
+<p style="margin:0 0 .5rem;color:var(--muted);font-size:.88rem">Datei <code>Herz_Schwarm_BaseStation.ino.bin</code> aus dem Build-Ordner (<code>arduino-cli compile --export-binaries</code> &rarr; <code>build/&hellip;/</code>). Nach dem Upload startet die Station neu.</p>
+<form id="otaf">
+<div class="form-grid">
+<label>Firmware (.bin)<input class="inp" type="file" id="otafile" accept=".bin"></label>
+<label>OTA-Passwort<input class="inp" type="password" id="otapw" autocomplete="off"></label>
+</div>
+<div class="btn-row"><button type="submit" class="btn">&#x2B06;&#xFE0F; Hochladen &amp; neu starten</button></div>
+</form>
+<p id="otamsg"></p>
+<p class="warn" id="otadef" style="display:none">&#x26A0;&#xFE0F; Standard-OTA-Passwort aktiv &mdash; eigenes in <code>ota_secret.h</code> setzen und neu flashen.</p>
 </div>
 <footer>
-&#x1F4CB; API: <code>GET /api/peers</code> &middot; <code>GET/POST /api/mqtt</code> &middot; <code>POST /api/effect?m=1&hellip;8[&amp;c=RRGGBB]</code><br>
+&#x1F4CB; API: <code>GET /api/peers</code> &middot; <code>GET/POST /api/mqtt</code> &middot; <code>POST /api/effect?m=1&hellip;8[&amp;c=RRGGBB]</code> &middot; <code>POST /api/identify?mac=&hellip;</code> &middot; <code>POST /api/ota</code><br>
 &#x2728; CCC Herz-Schwarm &mdash; HTTP ist unverschl&uuml;sselt; MQTT-Zugang nur im lokalen Netz setzen.
 </footer>
 </div>
@@ -607,13 +644,36 @@ async function load(){
    j.peers.forEach(function(p){
     var fw=(p.fw!==null&&p.fw!==undefined)?p.fw:'\u2753 unbekannt';
     var tr=document.createElement('tr');
-    tr.innerHTML='<td class="mono">\uD83C\uDF81 '+p.mac+'</td><td class="'+rssiClass(p.rssi)+'">'+rssiFace(p.rssi)+' '+p.rssi+' dBm</td><td>\uD83D\uDCE6 '+fw+'</td><td>\u23F1\uFE0F '+p.age_ms+'</td>';
+    tr.innerHTML='<td class="mono">\uD83C\uDF81 '+p.mac+'</td><td class="'+rssiClass(p.rssi)+'">'+rssiFace(p.rssi)+' '+p.rssi+' dBm</td><td>\uD83D\uDCE6 '+fw+'</td><td>\u23F1\uFE0F '+p.age_ms+'</td><td><button type="button" class="btn btn-find" onclick="findBadge(\''+p.mac+'\')">\uD83D\uDD0E Finden</button></td>';
     tb.appendChild(tr);
    });}
   pulse.textContent='\uD83D\uDFE2 Live';
   setMqttBadge(j.mqtt);
+  document.getElementById('otadef').style.display=j.ota_default?'block':'none';
  }catch(e){pulse.textContent='\u26A0\uFE0F Netz/API';}
 }
+async function findBadge(mac){
+ var m=document.getElementById('findmsg');
+ m.textContent='\u23F3 '+mac+' \u2026';m.style.color='var(--warn)';
+ try{var r=await fetch('/api/identify?mac='+encodeURIComponent(mac),{method:'POST'});var t=await r.text();
+  m.textContent=r.ok?('\uD83D\uDD0E '+mac+' blinkt jetzt 10 s gr\u00FCn'):('\u274C '+t);m.style.color=r.ok?'var(--cyan)':'#ff6b6b';
+ }catch(e){m.textContent='\u274C '+e;m.style.color='#ff6b6b';}
+}
+document.getElementById('otaf').addEventListener('submit',function(ev){
+ ev.preventDefault();
+ var m=document.getElementById('otamsg'),f=document.getElementById('otafile').files[0];
+ if(!f){m.textContent='\u274C Keine Datei gew\u00E4hlt';m.style.color='#ff6b6b';return;}
+ var fd=new FormData();fd.append('firmware',f,f.name);
+ var x=new XMLHttpRequest();x.open('POST','/api/ota');
+ x.setRequestHeader('Authorization','Basic '+btoa('admin:'+document.getElementById('otapw').value));
+ x.upload.onprogress=function(e){if(e.lengthComputable){m.textContent='\u23F3 '+Math.round(e.loaded*100/e.total)+' %';m.style.color='var(--warn)';}};
+ x.onload=function(){
+  if(x.status===200){m.textContent='\u2705 '+x.responseText+' \u2013 Seite l\u00E4dt in 15 s neu';m.style.color='var(--cyan)';setTimeout(function(){location.reload();},15000);}
+  else{m.textContent='\u274C '+x.status+' '+x.responseText;m.style.color='#ff6b6b';}
+ };
+ x.onerror=function(){m.textContent='\u274C Verbindung abgebrochen';m.style.color='#ff6b6b';};
+ x.send(fd);
+});
 async function doEffect(mode){
  var m=document.getElementById('msg');
  m.textContent='\u23F3 Sende\u2026';m.style.color='var(--warn)';
@@ -657,8 +717,9 @@ static void handleApiPeersTable() {
     char json[3072];
     size_t o = 0;
     o += snprintf(json + o, sizeof(json) - o,
-                  "{\"station\":\"%u.%u.%u\",\"mqtt\":{\"enabled\":%s,\"connected\":%s},\"n\":%d,\"peers\":[",
+                  "{\"station\":\"%u.%u.%u\",\"ota_default\":%s,\"mqtt\":{\"enabled\":%s,\"connected\":%s},\"n\":%d,\"peers\":[",
                   BASESTATION_FW_MAJOR, BASESTATION_FW_MINOR, BASESTATION_FW_PATCH,
+                  OTA_PASSWORD_IS_DEFAULT ? "true" : "false",
                   mqttCfg.enabled ? "true" : "false",
                   (mqttCfg.enabled && mqtt.connected()) ? "true" : "false",
                   n);
@@ -691,8 +752,7 @@ static void handleApiPeersTable() {
     server.send(200, "application/json", json);
 }
 
-static void sendEffectBroadcast(uint8_t mode, uint32_t beatCounter) {
-    if (mode < 1 || mode > SYNC_MODE_MAX) mode = 1;
+static SyncPacket makeSyncPacket(uint8_t mode, uint32_t beatCounter) {
     SyncPacket pkt = {};
     pkt.magic_id = MAGIC_ID;
     pkt.beatCounter = beatCounter;
@@ -702,6 +762,88 @@ static void sendEffectBroadcast(uint8_t mode, uint32_t beatCounter) {
     pkt.ver_minor = BASESTATION_FW_MINOR;
     pkt.ver_rel = BASESTATION_FW_PATCH;
     pkt.ver_dbg = 0;
+    return pkt;
+}
+
+// Nur das Badge mit dieser STA-MAC (wie in /api/peers) blinkt ~10 s grün (Badge-FW >= 1.3).
+static bool sendIdentify(const uint8_t *mac) {
+    uint8_t buf[sizeof(SyncPacket) + 6];
+    SyncPacket pkt = makeSyncPacket(SYNC_MODE_IDENTIFY, 0);
+    memcpy(buf, &pkt, sizeof(pkt));
+    memcpy(buf + sizeof(pkt), mac, 6);
+    bool ok = false;
+    for (int i = 0; i < IDENTIFY_REPEATS; i++) {
+        if (i) delay(15);
+        ok |= (esp_now_send(broadcastMac, buf, sizeof(buf)) == ESP_OK);
+    }
+    Serial.printf("Identify %02X:%02X:%02X:%02X:%02X:%02X %s\n",
+                  mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], ok ? "gesendet" : "fehlgeschlagen");
+    return ok;
+}
+
+static bool parseMac(const char *s, uint8_t out[6]) {
+    unsigned v[6];
+    if (sscanf(s, "%2x:%2x:%2x:%2x:%2x:%2x", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5]) != 6) return false;
+    for (int i = 0; i < 6; i++) out[i] = (uint8_t)v[i];
+    return true;
+}
+
+// POST /api/identify?mac=AA:BB:CC:DD:EE:FF
+static void handleIdentify() {
+    uint8_t mac[6];
+    if (!parseMac(server.arg("mac").c_str(), mac)) {
+        server.send(400, "text/plain", "mac muss AA:BB:CC:DD:EE:FF sein");
+        return;
+    }
+    if (sendIdentify(mac)) server.send(200, "text/plain", "ok");
+    else server.send(500, "text/plain", "esp_now_send fehlgeschlagen");
+}
+
+// --- OTA: POST /api/ota (multipart, Feld "firmware"), HTTP Basic Auth OTA_USER/OTA_PASSWORD ---
+static bool otaAuthorized = false;
+
+static void handleOtaUpload() {
+    HTTPUpload &up = server.upload();
+    if (up.status == UPLOAD_FILE_START) {
+        otaAuthorized = server.authenticate(OTA_USER, OTA_PASSWORD);
+        if (!otaAuthorized) {
+            Serial.println("OTA: Passwort falsch, Upload wird verworfen");
+            return;
+        }
+        Serial.printf("OTA: Start %s\n", up.filename.c_str());
+        if (!Update.begin(UPDATE_SIZE_UNKNOWN, U_FLASH)) Update.printError(Serial);
+    } else if (!otaAuthorized) {
+        return;
+    } else if (up.status == UPLOAD_FILE_WRITE) {
+        if (Update.write(up.buf, up.currentSize) != up.currentSize) Update.printError(Serial);
+    } else if (up.status == UPLOAD_FILE_END) {
+        if (Update.end(true)) Serial.printf("OTA: %u Byte geschrieben\n", (unsigned)up.totalSize);
+        else Update.printError(Serial);
+    } else if (up.status == UPLOAD_FILE_ABORTED) {
+        Update.abort();
+        Serial.println("OTA: Upload abgebrochen");
+    }
+}
+
+static void handleOtaDone() {
+    if (!otaAuthorized) {
+        // Kein WWW-Authenticate-Header: sonst öffnet der Browser einen eigenen Login-Dialog
+        server.send(401, "text/plain", "Passwort falsch");
+        return;
+    }
+    otaAuthorized = false;
+    if (Update.hasError() || !Update.isFinished()) {
+        server.send(500, "text/plain", String("Update fehlgeschlagen: ") + Update.errorString());
+        return;
+    }
+    server.send(200, "text/plain", "Update ok, Neustart");
+    delay(500);
+    ESP.restart();
+}
+
+static void sendEffectBroadcast(uint8_t mode, uint32_t beatCounter) {
+    if (mode < 1 || mode > SYNC_MODE_MAX) mode = 1;
+    SyncPacket pkt = makeSyncPacket(mode, beatCounter);
     if (esp_now_send(broadcastMac, (uint8_t *)&pkt, sizeof(pkt)) != ESP_OK) {
         Serial.println("esp_now_send effect failed");
     } else {
@@ -753,6 +895,11 @@ void setup() {
     server.on("/api/mqtt", HTTP_POST, handleMqttPost);
     server.on("/api/effect", HTTP_POST, handleEffect);
     server.on("/api/virus", HTTP_POST, handleVirus);
+    server.on("/api/identify", HTTP_POST, handleIdentify);
+    server.on("/api/ota", HTTP_POST, handleOtaDone, handleOtaUpload);
+#if OTA_PASSWORD_IS_DEFAULT
+    Serial.println("WARNUNG: OTA mit Standard-Passwort, eigenes in ota_secret.h setzen");
+#endif
     server.begin();
     Serial.println("HTTP auf :80 (nach ETH-Got-IP erreichbar)");
 }

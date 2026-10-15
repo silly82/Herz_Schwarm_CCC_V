@@ -40,7 +40,7 @@
 #define MAGIC_ID        0x421337CC
 #define BRIDGE_FW_MAJOR 0
 #define BRIDGE_FW_MINOR 1
-#define BRIDGE_FW_PATCH 5
+#define BRIDGE_FW_PATCH 6
 
 #define MAX_JSON_LEN    256
 #define SERIAL_BAUD     115200
@@ -276,7 +276,9 @@ void setup() {
     // 11B ist Pflicht: ESP-IDF 5.x lehnt G|N ohne B mit ESP_ERR_INVALID_ARG ab.
     esp_wifi_set_protocol(WIFI_IF_STA, WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G | WIFI_PROTOCOL_11N);
     esp_wifi_set_channel(CCC_CHANNEL, WIFI_SECOND_CHAN_NONE);
-    esp_wifi_set_max_tx_power(52);
+    // Maximum (84 = 21 dBm, Einheit 0,25 dBm): keine LEDs, keine Hitze-Grenze wie beim
+    // Badge (dort 52 = 13 dBm) → Effekte erreichen auch weit entfernte Badges.
+    esp_wifi_set_max_tx_power(84);
     WiFi.setSleep(false);
 
     if (esp_now_init() != ESP_OK) {

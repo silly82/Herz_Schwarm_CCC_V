@@ -1,43 +1,45 @@
 # Todo / Notizen (Projekt Herz-Schwarm)
 
-## Vorerst zurückgestellt
+Stand: 2026-10-15 — Badge 1.3.0, Basisstation 0.3.0, Bridge 0.1.6 (Versionen aller Module: README → *Versionen aller Module*).
 
-- **Flash / Binary-Größe:** ~900 KB ist für ESP-NOW + WiFi-Stack + Arduino + FastLED normal. Später optional:
-  - Morse-Eingabe: `String morseInput` durch kleinen festen `char[]` ersetzen (weniger Overhead, weniger Fragmentierung).
-  - Board-Option **Core Debug Level** auf **None** halten (Verbose vergrößert das Binary merklich).
-  - Mehr **App-Platz** ohne kleinere `.bin`: anderes **Partition Scheme** (z. B. `huge_app`), falls die 71 %-Anzeige stört — funktional oft unnötig.
+## Offen
 
-## Git / Release
+- **Nerves-App** (`herz_schwarm_nerves/`, Details in `MAC_SETUP.md` → *Bekannte Bugs*):
+  - Bridge-Port: Auto-Detect wird ignoriert, Fallback `/dev/ttyUSB0` (Workaround `UART_DEVICE=…`).
+  - Sporadischer Plug.Cowboy-Translator-Crash.
+  - „Badge finden“ (Modus 9) gibt es bisher nur in der Basisstation, nicht über Bridge/Nerves.
+- **Morse-Easter-Eggs:** bisher nur `-.-.` (Virus). Ideen: `...` → Regenbogen, `.-..` → Welle.
+- **Reichweite:** Badges kommen an der Basisstation oft nur mit −85 … −95 dBm an. Station/Bridge senden
+  seit 0.3.0/0.1.6 mit 21 dBm; Badges bleiben wegen Hitze bei 13 dBm. Falls nötig: ESP-NOW Long-Range-Modus
+  (`WIFI_PROTOCOL_LR`) — müsste auf **allen** Geräten gleichzeitig umgestellt werden.
 
-- **`Debug` → `main`:** Erst mergen, wenn auf **Hardware** verifiziert (Primzahl-Logik inkl. eigenes Gerät, Singularity, ESP-NOW, Basisstation + Badges mit neuen `mode` 2/3).
+## Erledigt (Auszug)
+
+- Schwarm-Puls wirklich synchron (gemeinsamer Phasen-Zähler statt lokalem `millis()`), 1.2.2.
+- Core-übergreifende Races in Badge und Basisstation, 1.2.3 / 0.2.2.
+- Basisstation: Modi 1–8, mDNS `herz-base.local`, `no_fs`-Partition (OTA-fähig), OTA-Upload, „Badge finden“.
+- Bridge: implizites Ack über Badge-SyncPackets, `CDCOnBoot=cdc` per `sketch.yaml`, ArduinoJson 7.
+- Morse-Eingabe als `char[]` (kein `String`).
+
+## Bewusst nicht vorgesehen
+
+- TLS für MQTT/Web.
+- Home-Assistant-Integration (MQTT reicht).
 
 ## Kurzreferenz Build
 
-- FQBN: `esp32:esp32:esp32s3`
-- Details: `.cursor/rules/arduino-cli.mdc`
+- Badge: `arduino-cli compile --fqbn esp32:esp32:esp32s3 .` bzw. `scripts/batch_flash_herz_schwarm.sh`.
+- Basisstation / Bridge: `arduino-cli compile <ordner>` — Board-Optionen kommen aus der jeweiligen `sketch.yaml`
+  (Bridge auf ESP32-C3/C6: `--fqbn esp32:esp32:esp32c3:CDCOnBoot=cdc` bzw. `esp32c6`).
+- Basisstation-OTA-Passwort: `Herz_Schwarm_BaseStation/ota_secret.h` (Vorlage `ota_secret.h.example`, gitignored).
 - **Nummerierte Gesamt-Doku:** `README.md` → Abschnitt *Projekt-Dokumentation (nummeriert)*.
 
----
+## Hardware (Referenz)
 
-## Basisstation (Umsetzungsstand)
+- **Badge:** Waveshare ESP32-S3-Matrix (4 MB Flash + 2 MB PSRAM im Chip).
+- **Basisstation:** [Spotpear ESP32-S3R8 PoE / RJ45 / W5500](https://spotpear.com/wiki/ESP32-S3R8-PoE-ETH-RJ45-Camera-Micro-SD-Pico-W5500-OV2640-OV5640.html) — Ethernet **W5500 (SPI)**, WiFi nur für ESP-NOW.
+- **Bridge:** beliebiger ESP32 mit USB (getestet: ESP32-C3, ESP32-S3; Doku: XIAO ESP32-C6).
 
-**Sketch:** `Herz_Schwarm_BaseStation/Herz_Schwarm_BaseStation.ino`
-
-1. **Ethernet:** W5500 (Spotpear-Pins wie im Sketch kommentiert), Web auf **:80** nach `ETH_GOT_IP`.
-2. **ESP-NOW:** Kanal **13**, passiv Peers sammeln + gezielter Broadcast (`SyncPacket`, Effekte `m=1|2|3`).
-3. **Web-UI:** Peers-Tabelle, Osteregg-Buttons, **MQTT-Einstellungen** (Broker, Port, Login, Topics) → **NVS**, Klartext-MQTT ohne TLS.
-4. **API:** siehe README (*Projekt-Dokumentation*, Punkte 5–6).
-
-### Noch offen / Ideen
-
-- TLS für MQTT/Web: bewusst **nicht** vorgesehen.
-- Home Assistant: nicht nötig; MQTT reicht für Integration nach Bedarf.
-
-### Hardware (Referenz)
-
-- **Gedachtes Board:** [Spotpear — ESP32-S3R8 PoE / RJ45 / W5500 …](https://spotpear.com/wiki/ESP32-S3R8-PoE-ETH-RJ45-Camera-Micro-SD-Pico-W5500-OV2640-OV5640.html) — u. a. **ESP32-S3R8**, Ethernet **W5500 (SPI)**; Pinbelegung im Wiki mit Sketch abgleichen.
-- **Technik:** WiFi bleibt für ESP-NOW aktiv; Datenpfad MQTT/Web über Ethernet.
-
-### Recht / Camp
+## Recht / Camp
 
 - Sniffing nur im eigenen Aufbau / mit Einverständnis der Beteiligten.

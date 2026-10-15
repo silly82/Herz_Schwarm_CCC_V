@@ -17,3 +17,7 @@ herz_schwarm_nerves/tmp/
 herz_schwarm_nerves/erl_crash.dump
 herz_schwarm_nerves/*.ez
 herz_schwarm_nerves/artifacts/
+
+# Basisstation: lokales OTA-Passwort (Vorlage: ota_secret.h.example)
+Herz_Schwarm_BaseStation/ota_secret.h
+Herz_Schwarm_BaseStation/build/
