@@ -51,3 +51,6 @@ Automatisch erzeugt von `scripts/batch_flash_herz_schwarm.sh`. Angehängte Zeile
 | 2026-10-15 17:08:53 +0200 | 1.2.3 | `/dev/cu.usbmodem142101` | ok | a0:f2:62:ec:40:f8 |
 | 2026-10-15 17:09:13 +0200 | 1.2.3 | `/dev/cu.usbmodem1431401` | ok | f0:f5:bd:6e:31:5c |
 | 2026-10-15 18:33:31 +0200 | 1.3.0 | `/dev/cu.usbmodem1431401` | ok | a0:f2:62:ec:3b:b4 |
+| 2026-10-15 18:38:56 +0200 | 1.3.0 | `/dev/cu.usbmodem142101` | ok | a0:f2:62:ec:31:ac |
+| 2026-10-15 18:39:17 +0200 | 1.3.0 | `/dev/cu.usbmodem1431401` | ok | f0:f5:bd:6e:29:64 |
+| 2026-10-15 18:39:35 +0200 | 1.3.0 | `/dev/cu.usbmodem143301` | ok | a0:f2:62:ec:3c:c8 |
