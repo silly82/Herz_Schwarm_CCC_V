@@ -240,16 +240,18 @@ Das A.B.C.D-Schema oben beschreibt **nur die Badge-Firmware** (`Herz_Schwarm_CCC
 
 | Modul | Datei | Define/Feld | Aktuell |
 |-------|-------|-------------|---------|
-| Badge (Schwarm) | `Herz_Schwarm_CCC_V.ino` | `FW_VERSION_MAJOR/MINOR/PATCH` | 1.2.0 |
-| Basisstation | `Herz_Schwarm_BaseStation/Herz_Schwarm_BaseStation.ino` | `BASESTATION_FW_MAJOR/MINOR/PATCH` | 0.1.7 |
-| Bridge (Nerves-Adapter) | `herz_schwarm_nerves/firmware/esp32_bridge/esp32_bridge.ino` | `BRIDGE_FW_MAJOR/MINOR/PATCH` | 0.1.2 |
+| Badge (Schwarm) | `Herz_Schwarm_CCC_V.ino` | `FW_VERSION_MAJOR/MINOR/PATCH` | 1.2.1 |
+| Basisstation | `Herz_Schwarm_BaseStation/Herz_Schwarm_BaseStation.ino` | `BASESTATION_FW_MAJOR/MINOR/PATCH` | 0.2.0 |
+| Bridge (Nerves-Adapter) | `herz_schwarm_nerves/firmware/esp32_bridge/esp32_bridge.ino` | `BRIDGE_FW_MAJOR/MINOR/PATCH` | 0.1.3 |
 | Nerves/Phoenix-App | `herz_schwarm_nerves/mix.exs` | `@version` | 0.1.1 |
 | Flash-Tooling (Python) | `scripts/flashlib/__init__.py` | `__version__` | 0.1.0 |
 
 Jedes Modul wird unabhängig gebaut, geflasht bzw. deployed — eine einzige globale Versionsnummer für alles ist bewusst nicht das Ziel. `scripts/version.sh all` zeigt den aktuellen Stand aller fünf; `scripts/version.sh tag` schreibt sie als Snapshot in die Tag-Message des `vA.B.C.D`-Releases (D bleibt reiner Git-Commit-Zähler seit dem letzten `vA.B.C`-Tag, repo-weit — nicht auf Badge-Änderungen beschränkt).
 
 ### ESP-NOW Paket (Sync)
-Kompaktes `SyncPacket` (packed): `magic_id`, `beatCounter`, `virusID`, `mode` wie bisher, plus **vier Byte** `ver_major`, `ver_minor`, `ver_rel`, `ver_dbg` (gesamt **17 Byte**). **Ältere Firmware** sendet nur **13 Byte** — wird weiter erkannt; die Version des Peers bleibt dann unbekannt (`?` im Debug-Log), bis ein Paket mit voller Länge ankommt. Zusätzliche Kosten: etwas größeres Payload pro Sendezyklus (weiterhin ein `esp_now_send` pro Frame), wenig RAM pro Peer für die gespeicherte Version.
+Kompaktes `SyncPacket` (packed): `magic_id`, `beatCounter`, `virusID`, `mode` wie bisher, plus **vier Byte** `ver_major`, `ver_minor`, `ver_rel`, `ver_dbg` (gesamt **17 Byte**). **Ältere Firmware** sendet nur **13 Byte** — wird weiter erkannt; die Version des Peers bleibt dann unbekannt (`?` im Debug-Log), bis ein Paket mit voller Länge ankommt. Zusätzliche Kosten: etwas größeres Payload pro Sendezyklus, wenig RAM pro Peer für die gespeicherte Version.
+
+**Senderate:** Ab Badge-FW 1.2.1 broadcastet jedes Badge mit **20 Hz** (`SYNC_TX_INTERVAL_MS`, vorher 50 Hz = jeder Frame); bei einem Wechsel von `mode`/`virusID` wird sofort gesendet, damit sich Effekte ohne Verzögerung verbreiten. Das reduziert die Kanal-Last bei vielen Badges um 60 %.
 
 **`mode`-Werte (Badge & Basisstation):** `0` normal; `1` Virus-Animation; `2` Fern-Regenbogen; `3` Fern-Primzahl-Party; `4` Welle (RSSI-basierter Ripple, ~4 s); `5` Beat-Puls (weiss, ~150 ms); `6` RSSI-Zonen-Farben (rot/gelb/blau, ~5 s); `7` Ambient-Farbe (RGB aus `beatCounter`, ~30 s); `8` Strobe (weisse Blitze, ~2 s). (Nur `1`…`8` lösen Effekte aus; `0` ist Standard nach den Effekt-Fenstern bzw. bei reiner Nähe-Logik.)
 
@@ -260,12 +262,12 @@ Kompaktes `SyncPacket` (packed): `magic_id`, `beatCounter`, `virusID`, `mode` wi
 1. **Badge-Sketch:** `Herz_Schwarm_CCC_V.ino` (Repo-Wurzel), Ziel-Hardware **Waveshare ESP32-S3-Matrix**, **FQBN** `esp32:esp32:esp32s3`, Kanal **13**, `MAGIC_ID` wie im Sketch.
 2. **Basisstation-Sketch:** Ordner `Herz_Schwarm_BaseStation/`, Datei `Herz_Schwarm_BaseStation.ino`, **FQBN** `esp32:esp32:esp32s3`; Ethernet **W5500** (Referenz-Pins Spotpear: SCK 13, MISO 12, MOSI 11, CS 14, RST 9, INT 10).
 3. **Firmware-Version Basisstation:** `BASESTATION_FW_MAJOR/MINOR/PATCH` im Basisstation-Sketch; in der Web-UI und in JSON (`/api/peers` → `station`) sichtbar (JSON-Key `station` ist ein fester String, unabhängig vom Define-Namen).
-4. **Web-UI Basisstation:** HTTP Port **80** nach Ethernet-IP (`/`): Peers-Tabelle (Polling), Eastereggs (Virus / Regenbogen / Primzahl-Party / Welle), **MQTT-Konfiguration** (Formular).
-5. **REST-API Basisstation:** `GET /api/peers` (JSON: Station-Version, Peer-Liste mit MAC, RSSI, Firmware-String, Alter); `POST /api/effect?m=1|2|3|4`; `POST /api/virus` (Alias für `m=1`); `GET /api/mqtt` (Konfiguration **ohne** Passwort, mit `has_password` und `connected`); `POST /api/mqtt` (Form-URL-encoded: `en`, `host`, `port`, `user`, optional `pass`, `ts`, `tc` — leeres Passwort = unverändert). Modi 5–8 werden nur vom Nerves-Controller gesendet (direkt via ESP-NOW-Bridge).
-6. **MQTT:** **Klartext-TCP** (typisch Port **1883**), **kein TLS**. Einstellungen in **NVS** (`Preferences`, Namespace `hs_mqtt`); Broker per **Hostname oder IP** (`Network.hostByName`). Topics konfigurierbar: Status (Publish, JSON wie Peers-Kurzform), Befehl (Subscribe → löst Virus/Effekt `m=1` aus).
-7. **Kompilieren Basisstation:** `arduino-cli compile --fqbn esp32:esp32:esp32s3 Herz_Schwarm_BaseStation` (Pfad zum Ordner anpassen).
+4. **Web-UI Basisstation:** **http://herz-base.local** (mDNS, ab 0.2.0) bzw. HTTP Port **80** auf der per DHCP vergebenen Ethernet-IP (Hostname `herz-base`, IP auch im Serial-Log `ETH IP: …`): Peers-Tabelle (Polling), alle Effekte **1–8** (Virus / Regenbogen / Primzahl-Party / Welle / Beat / Zonen / Ambient mit Farbwähler / Strobe), **MQTT-Konfiguration** (Formular).
+5. **REST-API Basisstation:** `GET /api/peers` (JSON: Station-Version, Peer-Liste mit MAC, RSSI, Firmware-String, Alter); `GET /api/peers` enthält außerdem `mqtt.enabled`/`mqtt.connected`; `POST /api/effect?m=1…8` (bei `m=7` optional `&c=RRGGBB` als Ambient-Farbe, Default Weiß; ungültiges `m` → HTTP 400); `POST /api/virus` (Alias für `m=1`); `GET /api/mqtt` (Konfiguration **ohne** Passwort, mit `has_password` und `connected`); `POST /api/mqtt` (Form-URL-encoded: `en`, `host`, `port`, `user`, optional `pass`, `ts`, `tc` — leeres Passwort = unverändert).
+6. **MQTT:** **Klartext-TCP** (typisch Port **1883**), **kein TLS**. Einstellungen in **NVS** (`Preferences`, Namespace `hs_mqtt`); Broker per **Hostname oder IP** (`Network.hostByName`). Topics konfigurierbar: Status (Publish, JSON wie Peers-Kurzform), Befehl (Subscribe). Befehls-Payload: leer → Virus (`m=1`, wie bisher); `N` → Effekt `N` (1–8); `7:RRGGBB` → Ambient-Farbe.
+7. **Kompilieren Basisstation:** `arduino-cli compile Herz_Schwarm_BaseStation` — **ohne `--fqbn`**, Board-Optionen kommen aus `Herz_Schwarm_BaseStation/sketch.yaml` (`PartitionScheme=no_fs`: 2× 2 MB App statt 1,25 MB, Flash-Auslastung ~52 % statt 78 %; `CDCOnBoot=cdc`: Serial-Log über USB). Ein explizites `--fqbn` überschreibt die Datei. In der Arduino IDE: *Partition Scheme* „No FS 4MB (2MB APP x2)“ und *USB CDC On Boot* „Enabled“ wählen. NVS-Offset ist identisch zu „Default“ → MQTT-Konfiguration bleibt beim Umstellen erhalten.
 8. **Flashen Badge:** `arduino-cli upload -p <PORT> --fqbn esp32:esp32:esp32s3 .` im Repo-Wurzelverzeichnis; Port mit `arduino-cli board list`.
-9. **Flashen Basisstation:** `arduino-cli upload -p <PORT> --fqbn esp32:esp32:esp32s3 Herz_Schwarm_BaseStation`.
+9. **Flashen Basisstation:** `arduino-cli upload -p <PORT> Herz_Schwarm_BaseStation` (ebenfalls ohne `--fqbn`, damit die neue Partitionstabelle mitgeflasht wird).
 9a. **Batch-Update Badges:** `scripts/batch_flash_herz_schwarm.sh` (siehe Abschnitt *Batch-Update*), Log: `firmware_update_log.csv` / `firmware_update_log.md`, Build-Cache `build_batch/`.
 10. **Build-Artefakte:** Ordner `build_debug/`, `build_batch/` und `build_basestation/` sind in `.gitignore` und gehören nicht ins Repository.
 11. **Abwärtskompatibilität:** Badges mit alter Firmware reagieren nur auf **`mode == 1`** (Virus); `2`–`8` werden ignoriert. Basisstation und Nerves-Controller können trotzdem alle Modi senden.

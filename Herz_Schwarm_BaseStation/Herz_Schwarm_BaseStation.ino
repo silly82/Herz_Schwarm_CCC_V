@@ -3,8 +3,9 @@
  *
  * - Lauscht ESP-NOW auf Kanal 13 (kompatibel zu Herz_Schwarm_CCC_V Badges).
  * - Keine regelmäßigen Sends → erscheint nicht in der Peer-Zählung der Badges.
- * - Optional: Effekt-Broadcast (SyncPacket mode 1=Virus, 2=Regenbogen, 3=Primzahl-Party, 4=Welle).
- * - Web-UI + JSON-API; MQTT optional, Broker/Zugangsdaten/Topics per Web-UI (NVS).
+ * - Optional: Effekt-Broadcast (SyncPacket mode 1–8, siehe README "mode-Werte").
+ * - Web-UI + JSON-API unter http://herz-base.local (mDNS); MQTT optional,
+ *   Broker/Zugangsdaten/Topics per Web-UI (NVS).
  *
  * Pinbelegung W5500 laut Spotpear-Wiki: SCK 13, MISO 12, MOSI 11, CS 14, RST 9, INT 10
  */
@@ -20,6 +21,7 @@
 #include <WebServer.h>
 #include <NetworkClient.h>
 #include <PubSubClient.h>
+#include <ESPmDNS.h>
 
 // --- Konfiguration Ethernet (Spotpear ESP32-S3-ETH) ---
 #define ETH_PHY_TYPE   ETH_PHY_W5500
@@ -37,15 +39,21 @@
 #define PEER_TIMEOUT_MS      4000
 #define MAX_PEERS            32
 #define SYNC_PACKET_LEGACY_LEN 13
+#define SYNC_MODE_MAX        8   // Badge-FW kennt Modi 1..8
+#define SYNC_MODE_AMBIENT    7   // Farbe als 0xRRGGBB im beatCounter
+#define HOSTNAME             "herz-base"
 
 #define BASESTATION_FW_MAJOR 0
-#define BASESTATION_FW_MINOR     1
-#define BASESTATION_FW_PATCH     7
+#define BASESTATION_FW_MINOR     2
+#define BASESTATION_FW_PATCH     0
 
 #define MQTT_NS "hs_mqtt"
 #define MQTT_HOST_DEF    "192.168.1.10"
 #define MQTT_TOPIC_STATUS_DEF "herzschwarm/base/status"
 #define MQTT_TOPIC_CMD_DEF    "herzschwarm/base/cmd/virus"
+#define MQTT_STATUS_JSON_LEN  2048
+// PubSubClient-Puffer muss Header + Topic + Payload fassen
+#define MQTT_BUFFER_LEN       (MQTT_STATUS_JSON_LEN + sizeof(((MqttCfg *)0)->topicStatus) + 8)
 
 struct __attribute__((packed)) SyncPacket {
     uint32_t magic_id;
@@ -94,7 +102,7 @@ static NetworkClient mqttNet;
 static PubSubClient mqtt(mqttNet);
 static uint32_t lastMqttPublish = 0;
 
-static void sendEffectBroadcast(uint8_t mode);
+static void sendEffectBroadcast(uint8_t mode, uint32_t beatCounter);
 static void loadMqttConfig();
 static bool resolveMqttBroker(IPAddress &out);
 static void mqttCallback(char *topic, byte *payload, unsigned int len);
@@ -124,12 +132,19 @@ static void onNetworkEvent(arduino_event_id_t event, arduino_event_info_t info) 
     (void)info;
     switch (event) {
         case ARDUINO_EVENT_ETH_START:
-            ETH.setHostname("herz-base");
+            ETH.setHostname(HOSTNAME);
             break;
         case ARDUINO_EVENT_ETH_GOT_IP:
             ethGotIp = true;
             Serial.print("ETH IP: ");
             Serial.println(ETH);
+            MDNS.end();
+            if (MDNS.begin(HOSTNAME)) {
+                MDNS.addService("http", "tcp", 80);
+                Serial.println("mDNS: http://" HOSTNAME ".local");
+            }
+            // Erst NACH MDNS.begin(): mDNS verstellt den WiFi-Stack, ohne
+            // erneutes Festlegen von Kanal 13 kommen keine ESP-NOW-Pakete mehr an.
             applyEspNowRadio();
             break;
         case ARDUINO_EVENT_ETH_LOST_IP:
@@ -218,14 +233,28 @@ static void appendMac(char *buf, size_t buflen, size_t *off, const uint8_t *mac)
 }
 
 static void handleVirus() {
-    sendEffectBroadcast(1);
+    sendEffectBroadcast(1, millis());
     server.send(200, "text/plain", "ok");
 }
 
+// Farbe "RRGGBB" oder "#RRGGBB" → 0xRRGGBB; ungültig → Weiß
+static uint32_t parseHexColor(const char *s) {
+    if (*s == '#') s++;
+    char *end = nullptr;
+    unsigned long v = strtoul(s, &end, 16);
+    if (end == s || (end - s) != 6) return 0xFFFFFF;
+    return (uint32_t)v;
+}
+
+// POST /api/effect?m=1..8[&c=RRGGBB]  (c nur für m=7 Ambient)
 static void handleEffect() {
-    int m = server.arg("m").toInt();
-    if (m < 1 || m > 4) m = 1;
-    sendEffectBroadcast((uint8_t)m);
+    long m = server.arg("m").toInt();
+    if (m < 1 || m > SYNC_MODE_MAX) {
+        server.send(400, "text/plain", "m muss 1-8 sein");
+        return;
+    }
+    uint32_t beat = (m == SYNC_MODE_AMBIENT) ? parseHexColor(server.arg("c").c_str()) : millis();
+    sendEffectBroadcast((uint8_t)m, beat);
     server.send(200, "text/plain", "ok");
 }
 
@@ -278,12 +307,25 @@ static void mqttBuildClientId(char *cid, size_t clen) {
     snprintf(cid, clen, "herzsw-%02X%02X%02X", m[3], m[4], m[5]);
 }
 
+// Payload: leer → Virus (kompatibel zu früher); "N" → Modus N (1..8);
+// "7:RRGGBB" → Ambient-Farbe.
 static void mqttCallback(char *topic, byte *payload, unsigned int len) {
-    (void)payload;
-    (void)len;
-    if (strcmp(topic, mqttCfg.topicCmd) == 0) {
-        sendEffectBroadcast(1);
+    if (strcmp(topic, mqttCfg.topicCmd) != 0) return;
+    char buf[16];
+    unsigned int n = len < sizeof(buf) - 1 ? len : sizeof(buf) - 1;
+    memcpy(buf, payload, n);
+    buf[n] = '\0';
+    long m = n ? strtol(buf, nullptr, 10) : 1;
+    if (m < 1 || m > SYNC_MODE_MAX) {
+        Serial.printf("MQTT cmd ignoriert: \"%s\"\n", buf);
+        return;
     }
+    uint32_t beat = millis();
+    if (m == SYNC_MODE_AMBIENT) {
+        const char *colon = strchr(buf, ':');
+        beat = colon ? parseHexColor(colon + 1) : 0xFFFFFF;
+    }
+    sendEffectBroadcast((uint8_t)m, beat);
 }
 
 static void mqttTryConnect() {
@@ -303,7 +345,6 @@ static void mqttTryConnect() {
         return;
     }
     mqtt.setServer(ip, mqttCfg.port);
-    mqtt.setBufferSize(768);
 
     char clientId[24];
     mqttBuildClientId(clientId, sizeof(clientId));
@@ -325,7 +366,7 @@ static void mqttTryConnect() {
 static void mqttPublishStatus() {
     if (!mqtt.connected()) return;
     uint32_t now = millis();
-    char json[2048];
+    char json[MQTT_STATUS_JSON_LEN];
     size_t o = 0;
     o += snprintf(json + o, sizeof(json) - o, "{\"n\":%d,\"peers\":[", countActivePeers(now));
     bool first = true;
@@ -341,7 +382,9 @@ static void mqttPublishStatus() {
     }
     portEXIT_CRITICAL(&peerMux);
     o += snprintf(json + o, sizeof(json) - o, "]}");
-    mqtt.publish(mqttCfg.topicStatus, json);
+    if (!mqtt.publish(mqttCfg.topicStatus, json)) {
+        Serial.printf("MQTT publish fehlgeschlagen (%u Byte)\n", (unsigned)o);
+    }
 }
 
 static void handleMqttGet() {
@@ -430,6 +473,12 @@ h1{font-size:1.45rem;font-weight:700;margin:0;letter-spacing:-.02em;}
 .btn-pr{background:linear-gradient(135deg,var(--cyan),#0d9488);box-shadow:0 4px 18px rgba(0,212,170,.3)}
 .btn-wv{background:linear-gradient(135deg,#3b82f6,#6366f1);box-shadow:0 4px 18px rgba(59,130,246,.35)}
 .btn-sec{background:linear-gradient(135deg,#3d3d52,#52526b);box-shadow:0 2px 12px rgba(0,0,0,.25)}
+.btn-bt{background:linear-gradient(135deg,#f97316,#ea580c);box-shadow:0 4px 18px rgba(249,115,22,.3)}
+.btn-zn{background:linear-gradient(135deg,#eab308,#ca8a04);box-shadow:0 4px 18px rgba(234,179,8,.3)}
+.btn-st{background:linear-gradient(135deg,#64748b,#334155);box-shadow:0 4px 18px rgba(100,116,139,.3)}
+.amb{display:inline-flex;align-items:center;gap:.35rem}
+.amb input[type=color]{width:2.6rem;height:2.4rem;border:1px solid var(--bd);border-radius:8px;background:#12121a;padding:2px;cursor:pointer}
+.warn{font-size:.78rem;color:var(--warn);margin:.6rem 0 0}
 #msg,#mqmsg{min-height:1.4rem;font-size:.88rem;color:var(--cyan);margin:.5rem 0 0;}
 .form-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:.85rem;margin:.5rem 0 1rem;}
 .form-grid label{display:flex;flex-direction:column;gap:.35rem;font-size:.78rem;color:var(--muted)}
@@ -459,13 +508,20 @@ footer code{background:#12121a;padding:.12rem .35rem;border-radius:6px;border:1p
 </div>
 <div class="card">
 <h2>&#x1F384; Eastereggs (ESP-NOW)</h2>
-<p style="margin:0 0 .75rem;color:var(--muted);font-size:.88rem">Gleiche Effekte wie am Badge: Morse-Virus, Singularity-Regenbogen (17+ Peers), Primzahl-Sparkles, Welle (RSSI-Ripple) &mdash; hier per Funk ausl&ouml;sen. Badges brauchen passende Firmware (Modi 1&ndash;4).</p>
+<p style="margin:0 0 .75rem;color:var(--muted);font-size:.88rem">Gleiche Effekte wie am Badge: Morse-Virus, Singularity-Regenbogen (17+ Peers), Primzahl-Sparkles, Welle (RSSI-Ripple) &mdash; plus Beat, Zonen, Ambient-Farbe und Strobe. Modi 5&ndash;8 brauchen Badge-FW &ge; 1.1.</p>
 <div class="btn-row">
 <button type="button" class="btn" onclick="doEffect(1)">&#x26A1; Virus (wei&szlig;)</button>
 <button type="button" class="btn btn-rb" onclick="doEffect(2)">&#x1F308; Regenbogen</button>
 <button type="button" class="btn btn-pr" onclick="doEffect(3)">&#x2728; Primzahl-Party</button>
 <button type="button" class="btn btn-wv" onclick="doEffect(4)">&#x1F30A; Welle</button>
 </div>
+<div class="btn-row">
+<button type="button" class="btn btn-bt" onclick="doEffect(5)">&#x1F941; Beat</button>
+<button type="button" class="btn btn-zn" onclick="doEffect(6)">&#x1F3AF; Zonen</button>
+<span class="amb"><button type="button" class="btn btn-sec" onclick="doEffect(7)">&#x1F3A8; Ambient</button><input type="color" id="ambc" value="#ff2a88" title="Ambient-Farbe"></span>
+<button type="button" class="btn btn-st" onclick="doEffect(8)">&#x26A0;&#xFE0F; Strobe</button>
+</div>
+<p class="warn">&#x26A0;&#xFE0F; Strobe blitzt ~6&times; pro Sekunde &mdash; nicht ausl&ouml;sen, wenn photosensible Menschen in der N&auml;he sind.</p>
 <p id="msg"></p>
 </div>
 <div class="card">
@@ -494,7 +550,7 @@ footer code{background:#12121a;padding:.12rem .35rem;border-radius:6px;border:1p
 <table id="tbl"><thead><tr><th>&#x1F4CD; MAC</th><th>&#x1F4F6; RSSI</th><th>&#x1F4E6; Firmware</th><th>&#x23F1;&#xFE0F; &Delta; ms</th></tr></thead><tbody id="tb"></tbody></table>
 </div>
 <footer>
-&#x1F4CB; API: <code>GET /api/peers</code> &middot; <code>GET/POST /api/mqtt</code> &middot; <code>POST /api/effect?m=1|2|3|4</code><br>
+&#x1F4CB; API: <code>GET /api/peers</code> &middot; <code>GET/POST /api/mqtt</code> &middot; <code>POST /api/effect?m=1&hellip;8[&amp;c=RRGGBB]</code><br>
 &#x2728; CCC Herz-Schwarm &mdash; HTTP ist unverschl&uuml;sselt; MQTT-Zugang nur im lokalen Netz setzen.
 </footer>
 </div>
@@ -549,13 +605,15 @@ async function load(){
     tb.appendChild(tr);
    });}
   pulse.textContent='\uD83D\uDFE2 Live';
-  var rm=await fetch('/api/mqtt');setMqttBadge(await rm.json());
+  setMqttBadge(j.mqtt);
  }catch(e){pulse.textContent='\u26A0\uFE0F Netz/API';}
 }
 async function doEffect(mode){
  var m=document.getElementById('msg');
  m.textContent='\u23F3 Sende\u2026';m.style.color='var(--warn)';
- try{var r=await fetch('/api/effect?m='+encodeURIComponent(mode),{method:'POST'});var t=await r.text();
+ var q='m='+encodeURIComponent(mode);
+ if(mode===7)q+='&c='+encodeURIComponent(document.getElementById('ambc').value.slice(1));
+ try{var r=await fetch('/api/effect?'+q,{method:'POST'});var t=await r.text();
   m.textContent=(r.ok?'\u2705 ':'\u274C ')+t;m.style.color=r.ok?'var(--cyan)':'#ff6b6b';
  }catch(e){m.textContent='\u274C '+e;m.style.color='#ff6b6b';}
 }
@@ -590,8 +648,12 @@ static void handleApiPeersTable() {
     uint32_t now = millis();
     char json[3072];
     size_t o = 0;
-    o += snprintf(json + o, sizeof(json) - o, "{\"station\":\"%u.%u.%u\",\"n\":%d,\"peers\":[",
-                  BASESTATION_FW_MAJOR, BASESTATION_FW_MINOR, BASESTATION_FW_PATCH, countActivePeers(now));
+    o += snprintf(json + o, sizeof(json) - o,
+                  "{\"station\":\"%u.%u.%u\",\"mqtt\":{\"enabled\":%s,\"connected\":%s},\"n\":%d,\"peers\":[",
+                  BASESTATION_FW_MAJOR, BASESTATION_FW_MINOR, BASESTATION_FW_PATCH,
+                  mqttCfg.enabled ? "true" : "false",
+                  (mqttCfg.enabled && mqtt.connected()) ? "true" : "false",
+                  countActivePeers(now));
 
     bool first = true;
     portENTER_CRITICAL(&peerMux);
@@ -625,11 +687,11 @@ static void handleApiPeersTable() {
     server.send(200, "application/json", json);
 }
 
-static void sendEffectBroadcast(uint8_t mode) {
-    if (mode < 1 || mode > 4) mode = 1;
+static void sendEffectBroadcast(uint8_t mode, uint32_t beatCounter) {
+    if (mode < 1 || mode > SYNC_MODE_MAX) mode = 1;
     SyncPacket pkt = {};
     pkt.magic_id = MAGIC_ID;
-    pkt.beatCounter = (uint32_t)millis();
+    pkt.beatCounter = beatCounter;
     pkt.virusID = (uint32_t)esp_random();
     pkt.mode = mode;
     pkt.ver_major = BASESTATION_FW_MAJOR;
@@ -650,6 +712,7 @@ void setup() {
 
     loadMqttConfig();
     mqtt.setCallback(mqttCallback);
+    mqtt.setBufferSize(MQTT_BUFFER_LEN);
 
     Network.onEvent(onNetworkEvent);
 

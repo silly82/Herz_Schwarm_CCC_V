@@ -1,0 +1,5 @@
+# Board-Optionen für `arduino-cli compile/upload` ohne --fqbn.
+# no_fs: 2× 2 MB App-Partition (OTA-fähig, kein SPIFFS — wird nicht genutzt).
+#        NVS liegt wie bei "default" auf 0x9000 → MQTT-Konfiguration bleibt erhalten.
+# CDCOnBoot=cdc: Serial-Log (u. a. "ETH IP: …") über das USB-Kabel.
+default_fqbn: esp32:esp32:esp32s3:PartitionScheme=no_fs,CDCOnBoot=cdc
