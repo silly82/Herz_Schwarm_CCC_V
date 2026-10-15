@@ -45,7 +45,7 @@
 
 #define BASESTATION_FW_MAJOR 0
 #define BASESTATION_FW_MINOR     2
-#define BASESTATION_FW_PATCH     0
+#define BASESTATION_FW_PATCH     1
 
 #define MQTT_NS "hs_mqtt"
 #define MQTT_HOST_DEF    "192.168.1.10"
@@ -111,7 +111,8 @@ static void appendJsonString(char *buf, size_t cap, size_t *off, const char *s);
 // WiFi/ESP-NOW wie Badge-Sketch; nach ETH-Start erneut aufrufen (Stack kann Kanal zurücksetzen).
 static void applyEspNowRadio() {
     WiFi.mode(WIFI_STA);
-    if (esp_wifi_set_protocol(WIFI_IF_STA, WIFI_PROTOCOL_11G | WIFI_PROTOCOL_11N) != ESP_OK) {
+    // 11B ist Pflicht: ESP-IDF 5.x lehnt G|N ohne B mit ESP_ERR_INVALID_ARG ab.
+    if (esp_wifi_set_protocol(WIFI_IF_STA, WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G | WIFI_PROTOCOL_11N) != ESP_OK) {
         Serial.println("esp_wifi_set_protocol fehlgeschlagen");
     }
     esp_err_t err = esp_wifi_set_channel(CCC_CHANNEL, WIFI_SECOND_CHAN_NONE);

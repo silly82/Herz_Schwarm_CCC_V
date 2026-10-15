@@ -28,7 +28,7 @@
  */
 #define FW_VERSION_MAJOR 1
 #define FW_VERSION_MINOR   2
-#define FW_VERSION_PATCH   1
+#define FW_VERSION_PATCH   2
 #define FW_DEBUG_BUILD     1  // Nur Debug-Zweig: bei sichtbarem neuen Debug-Stand +1, max 99
 
 #if FW_DEBUG_BUILD < 1 || FW_DEBUG_BUILD > 99
@@ -48,6 +48,12 @@
 #define PEER_TIMEOUT 4000       // Nach 4 Sek. wird ein verschwundenes Badge gelöscht
 #define MAX_PEERS   25
 #define SYNC_TX_INTERVAL_MS 50  // 20 Hz Sync-Broadcast (Frame-Rate bleibt 50 Hz)
+
+// Schwarm-Takt: heartBeatState ist ein gemeinsamer Phasen-Zähler, 1 Puls = 65536.
+// Empfangene Werte, die vorne liegen, werden übernommen (Max-Regel) → alle Badges
+// folgen dem schnellsten. Kleine Abstände weich aufholen, große direkt springen.
+#define BEAT_UNITS_PER_PULSE 65536UL
+#define BEAT_JUMP_THRESHOLD  (4 * BEAT_UNITS_PER_PULSE)
 
 // Remote-Effekte (Basisstation / kompatibles Paket): mode im SyncPacket
 #define SYNC_MODE_VIRUS    1  // weißer Blitz (wie Morse -.-.) — 3 s
@@ -115,7 +121,9 @@ uint8_t uniquePeerCount = 0;
 
 // --- VARIABLEN ---
 volatile float smoothRSSI = -95;   // volatile: wird in ISR (OnDataRecv) geschrieben
-uint32_t heartBeatState = 0;
+uint32_t heartBeatState = 0;     // Schwarm-Phase (siehe BEAT_UNITS_PER_PULSE)
+uint32_t beatCatchup = 0;        // noch aufzuholender Vorsprung des schnellsten Peers
+static portMUX_TYPE beatMux = portMUX_INITIALIZER_UNLOCKED;
 uint8_t hueOffset = 0;
 uint8_t broadcastMac[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 
@@ -163,7 +171,10 @@ static void printFwVersionBanner() {
 
 static void sendSync(uint8_t mode, uint32_t fxId) {
     txData.magic_id = MAGIC_ID;
-    txData.beatCounter = heartBeatState;
+    // Ambient: beatCounter trägt die Farbe (0xRRGGBB), sonst den Schwarm-Takt
+    txData.beatCounter = (mode == SYNC_MODE_AMBIENT)
+        ? ((uint32_t)ambientR << 16) | ((uint32_t)ambientG << 8) | ambientB
+        : heartBeatState;
     txData.virusID = fxId;
     txData.mode = mode;
     txData.ver_major = FW_VERSION_MAJOR;
@@ -176,6 +187,12 @@ static void sendSync(uint8_t mode, uint32_t fxId) {
 #endif
     // Fehler ignorieren — nächster Sendezyklus sendet wieder
     esp_now_send(broadcastMac, (uint8_t *)&txData, sizeof(txData));
+}
+
+// Puls-Helligkeit aus der gemeinsamen Schwarm-Phase (statt beatsin8, das mit dem
+// lokalen millis() rechnet und daher nie zwischen Badges synchron ist).
+static inline uint8_t swarmPulse(uint8_t lowest, uint8_t highest) {
+    return lowest + scale8(sin8((uint8_t)(heartBeatState >> 8)), highest - lowest);
 }
 
 // --- HELPER: PRIMZAHL (LUT, O(1)) ---
@@ -227,7 +244,17 @@ void OnDataRecv(const esp_now_recv_info_t *recv_info, const uint8_t *incomingDat
 
     float currentRSSI = (float)recv_info->rx_ctrl->rssi;
     smoothRSSI = (0.05f * currentRSSI) + (0.95f * smoothRSSI);
-    heartBeatState = rx.beatCounter;
+    if (rx.mode != SYNC_MODE_AMBIENT) {  // bei Ambient ist beatCounter eine Farbe
+        int32_t ahead = (int32_t)(rx.beatCounter - heartBeatState);
+        portENTER_CRITICAL(&beatMux);
+        if (ahead > (int32_t)BEAT_JUMP_THRESHOLD) {
+            heartBeatState = rx.beatCounter;
+            beatCatchup = 0;
+        } else if (ahead > 0 && (uint32_t)ahead > beatCatchup) {
+            beatCatchup = (uint32_t)ahead;
+        }
+        portEXIT_CRITICAL(&beatMux);
+    }
 
     const uint32_t now = millis();
     #define FX_START(idx, rxid) do { if ((rxid) != fx[idx].id) { fx[idx].id = (rxid); fx[idx].startTime = now; fx[idx].active = true; } } while(0)
@@ -271,7 +298,8 @@ void setup() {
     }
 
     WiFi.mode(WIFI_STA);
-    esp_wifi_set_protocol(WIFI_IF_STA, WIFI_PROTOCOL_11G | WIFI_PROTOCOL_11N);
+    // 11B ist Pflicht: ESP-IDF 5.x lehnt G|N ohne B mit ESP_ERR_INVALID_ARG ab.
+    esp_wifi_set_protocol(WIFI_IF_STA, WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G | WIFI_PROTOCOL_11N);
     esp_wifi_set_channel(CCC_CHANNEL, WIFI_SECOND_CHAN_NONE);
     esp_wifi_set_max_tx_power(52);
     WiFi.setSleep(false);
@@ -361,7 +389,18 @@ void loop() {
     float norm = (inputRSSI - (-95)) / 50.0f;
     float power = norm * norm;
     uint8_t currentBright = BRIGHT_MIN + (uint8_t)(power * (BRIGHT_MAX - BRIGHT_MIN));
-    heartBeatState += 2 + (uint32_t)(power * 10.0f);
+    // Takt fortschreiben: Modus-Tempo des letzten Frames + RSSI-Anteil (Nähe = schneller)
+    static uint32_t lastBeatMs = now;
+    static uint8_t modeBpm = 35;
+    float bpm = modeBpm + 23.4f + 117.2f * power;
+    uint32_t beatStep = (uint32_t)(bpm * (float)(now - lastBeatMs) * (BEAT_UNITS_PER_PULSE / 60000.0f));
+    lastBeatMs = now;
+    portENTER_CRITICAL(&beatMux);
+    uint32_t catchStep = beatCatchup ? beatCatchup / 4 + 1 : 0;
+    if (catchStep > beatCatchup) catchStep = beatCatchup;
+    beatCatchup -= catchStep;
+    heartBeatState += beatStep + catchStep;
+    portEXIT_CRITICAL(&beatMux);
 
     // 5. ANIMATIONS-WEICHE
     FastLED.clear();
@@ -378,13 +417,15 @@ void loop() {
     }
     else if (fx[E_RAINBOW].active && (now - fx[E_RAINBOW].startTime < REMOTE_RAINBOW_MS)) {
         hueOffset += 5;
-        pulse = beatsin8(100, 150, 255, 0, heartBeatState);
+        modeBpm = 100;
+        pulse = swarmPulse(150, 255);
         for (int i = 0; i < NUM_LEDS; i++) leds[i] = CHSV(hueOffset + (i*3), 255, pulse);
         activeMode = SYNC_MODE_RAINBOW;
         activeFxId = fx[E_RAINBOW].id;
     }
     else if (fx[E_PRIME].active && (now - fx[E_PRIME].startTime < REMOTE_PRIME_MS)) {
-        pulse = beatsin8(80, 120, 255, 0, heartBeatState);
+        modeBpm = 80;
+        pulse = swarmPulse(120, 255);
         fill_solid(leds, NUM_LEDS, heartColor);
         nscale8(leds, NUM_LEDS, pulse);
         if (random8() > 210) leds[random8(64)] = CRGB::White;
@@ -431,7 +472,8 @@ void loop() {
         if (rssiSnapshot > -55) zoneColor = ZONE0_COLOR;
         else if (rssiSnapshot > -75) zoneColor = ZONE1_COLOR;
         else zoneColor = ZONE2_COLOR;
-        pulse = beatsin8(60, 150, 255, 0, heartBeatState);
+        modeBpm = 60;
+        pulse = swarmPulse(150, 255);
         fill_solid(leds, NUM_LEDS, zoneColor);
         nscale8(leds, NUM_LEDS, pulse);
         activeMode = SYNC_MODE_ZONE;
@@ -453,7 +495,8 @@ void loop() {
     else if (uniquePeerCount + 1 >= 17) {
         // THE SINGULARITY
         hueOffset += 5;
-        pulse = beatsin8(100, 150, 255, 0, heartBeatState);
+        modeBpm = 100;
+        pulse = swarmPulse(150, 255);
         for (int i = 0; i < NUM_LEDS; i++) leds[i] = CHSV(hueOffset + (i*3), 255, pulse);
         activeMode = 0;
     }
@@ -462,8 +505,8 @@ void loop() {
         for (int i = 0; i < E_COUNT; i++) fx[i].active = false;
         uint8_t totalDevices = uniquePeerCount + 1;
         bool prime = isPrimeFast(totalDevices);
-        pulse = prime ? beatsin8(80, 120, 255, 0, heartBeatState)
-                      : beatsin8(35 + (uint8_t)(power*55), 100, 255, 0, heartBeatState);
+        modeBpm = prime ? 80 : 35 + (uint8_t)(power * 55);
+        pulse = prime ? swarmPulse(120, 255) : swarmPulse(100, 255);
         fill_solid(leds, NUM_LEDS, heartColor);
         nscale8(leds, NUM_LEDS, pulse);
         if (prime && random8() > 210) leds[random8(64)] = CRGB::White;

@@ -240,9 +240,9 @@ Das A.B.C.D-Schema oben beschreibt **nur die Badge-Firmware** (`Herz_Schwarm_CCC
 
 | Modul | Datei | Define/Feld | Aktuell |
 |-------|-------|-------------|---------|
-| Badge (Schwarm) | `Herz_Schwarm_CCC_V.ino` | `FW_VERSION_MAJOR/MINOR/PATCH` | 1.2.1 |
-| Basisstation | `Herz_Schwarm_BaseStation/Herz_Schwarm_BaseStation.ino` | `BASESTATION_FW_MAJOR/MINOR/PATCH` | 0.2.0 |
-| Bridge (Nerves-Adapter) | `herz_schwarm_nerves/firmware/esp32_bridge/esp32_bridge.ino` | `BRIDGE_FW_MAJOR/MINOR/PATCH` | 0.1.3 |
+| Badge (Schwarm) | `Herz_Schwarm_CCC_V.ino` | `FW_VERSION_MAJOR/MINOR/PATCH` | 1.2.2 |
+| Basisstation | `Herz_Schwarm_BaseStation/Herz_Schwarm_BaseStation.ino` | `BASESTATION_FW_MAJOR/MINOR/PATCH` | 0.2.1 |
+| Bridge (Nerves-Adapter) | `herz_schwarm_nerves/firmware/esp32_bridge/esp32_bridge.ino` | `BRIDGE_FW_MAJOR/MINOR/PATCH` | 0.1.4 |
 | Nerves/Phoenix-App | `herz_schwarm_nerves/mix.exs` | `@version` | 0.1.1 |
 | Flash-Tooling (Python) | `scripts/flashlib/__init__.py` | `__version__` | 0.1.0 |
 
@@ -250,6 +250,8 @@ Jedes Modul wird unabhängig gebaut, geflasht bzw. deployed — eine einzige glo
 
 ### ESP-NOW Paket (Sync)
 Kompaktes `SyncPacket` (packed): `magic_id`, `beatCounter`, `virusID`, `mode` wie bisher, plus **vier Byte** `ver_major`, `ver_minor`, `ver_rel`, `ver_dbg` (gesamt **17 Byte**). **Ältere Firmware** sendet nur **13 Byte** — wird weiter erkannt; die Version des Peers bleibt dann unbekannt (`?` im Debug-Log), bis ein Paket mit voller Länge ankommt. Zusätzliche Kosten: etwas größeres Payload pro Sendezyklus, wenig RAM pro Peer für die gespeicherte Version.
+
+**`beatCounter` = Schwarm-Takt (ab Badge-FW 1.2.2):** gemeinsamer Phasen-Zähler, ein Puls = 65536 Einheiten; die Helligkeit wird ausschließlich daraus berechnet. Empfängt ein Badge einen Wert, der vor seinem eigenen liegt, holt er weich auf (Max-Regel, ab 4 Pulsen Abstand direkter Sprung) — der Schwarm folgt so dem schnellsten Badge und pulsiert synchron. Ausnahme Modus `7`: dort ist `beatCounter` die Farbe. Bis 1.2.1 lief der Puls über `beatsin8()` mit dem lokalen `millis()` und war deshalb nie wirklich synchron.
 
 **Senderate:** Ab Badge-FW 1.2.1 broadcastet jedes Badge mit **20 Hz** (`SYNC_TX_INTERVAL_MS`, vorher 50 Hz = jeder Frame); bei einem Wechsel von `mode`/`virusID` wird sofort gesendet, damit sich Effekte ohne Verzögerung verbreiten. Das reduziert die Kanal-Last bei vielen Badges um 60 %.
 
