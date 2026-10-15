@@ -16,7 +16,7 @@ Ein Schwarm von 8x8 LED Herz-Badges auf Basis der **Waveshare ESP32-S3-Matrix**.
 - **Primzahlen-Osterei:** Wenn die **Gesamtzahl im Schwarm** eine Primzahl ist — also **sichtbare andere Badges plus dein eigenes** (z. B. du + 16 andere = 17) — pulsiert das Herz stärker und es gibt weisse Glitzer-Pixel.
 - **Die Singularität (≥17 Geräte):** Sobald **mindestens 17 Geräte insgesamt** da sind (du + 16 sichtbare Peers), schaltet die Animation auf den **Regenbogen-Modus** um (nicht nur bei exakt 17).
 - **Der Morse-Virus:** Morsese ein **«C»** (`- . - .`) über die BOOT-Taste, um einen weissen Blitz-Virus durch den gesamten Schwarm zu jagen.
-- **Die Welle (Basisstation):** Eine Welle breitet sich von der Basisstation aus: Badges in der Nähe leuchten zuerst, weiter entfernte später (RSSI-basierte Verzögerung, ~4 s Gesamtdauer). Badges leiten die Welle per ESP-NOW weiter.
+- **Die Welle (Basisstation):** Eine Welle breitet sich von der Basisstation aus: Badges in der Nähe leuchten zuerst, weiter entfernte später (~4 s Gesamtdauer). Ab Badge-FW 1.4.0: Wer die Basis direkt hört, zündet nach deren Signal (−45 dBm → sofort, −95 dBm → 2 s); alle anderen nach dem Badge, von dem sie die Welle haben, plus 150–750 ms je nach Signal zu ihm. Jedes Badge rechnet dabei auf den gemeinsamen Wellenstart zurück und übernimmt den kürzesten bekannten Weg — die Welle läuft so auch zu Badges, die die Basis gar nicht hören.
 - **Fernauslösung (Basisstation):** Kompatibles `SyncPacket` mit `mode` **1** (Virus), **2** (Regenbogen / Singularity-Optik ~15 s), **3** (Primzahl-Party ~12 s), **4** (Welle / RSSI-Ripple ~4 s), **5** (Beat-Puls ~150 ms), **6** (RSSI-Zonen-Farben ~5 s), **7** (Ambient-Farbe ~30 s), **8** (Strobe ~2 s). Neue `virusID` pro Effekt verhindert Doppel-Trigger; während eines Effekts wird der passende `mode` weitergesendet (Kettenreaktion im Schwarm).
 - **Nerves-Controller (Raspberry Pi):** Optionale Elixir/Nerves-App (`herz_schwarm_nerves/`) steuert den Schwarm über einen USB-ESP32-Bridge (ESP-NOW). LiveView Web-UI für Effekt-Steuerung, Beat-Tap-Tempo, Ambient-Farbwahl. Koexistiert mit der Basisstation auf Kanal 13. **Dev-Start auf Mac** (ohne Nerves-Build): siehe `herz_schwarm_nerves/MAC_SETUP.md`.
 
@@ -38,7 +38,7 @@ A swarm of 8x8 LED heart badges based on the **Waveshare ESP32-S3-Matrix**. They
 - **Prime Number Easter Egg:** When the **total swarm size** is prime — **other visible badges plus your own** (e.g. you + 16 others = 17) — the heart pulses more strongly with occasional white sparkles.
 - **The Singularity (≥17 devices):** When **at least 17 devices** are present in total (you + 16 visible peers), the animation switches to **rainbow mode** (not only at exactly 17).
 - **The Morse Virus:** Morse a **"C"** (`- . - .`) using the BOOT button to trigger a white flash "virus" across the entire swarm.
-- **The Wave (base station):** A wave ripples outward from the base station: nearby badges light up first, distant ones later (RSSI-based delay, ~4 s total). Badges re-broadcast the wave via ESP-NOW for swarm propagation.
+- **The Wave (base station):** A wave ripples outward from the base station: nearby badges light up first, distant ones later (~4 s total). From badge FW 1.4.0, badges that hear the base fire by its signal strength (−45 dBm → immediately, −95 dBm → 2 s); others fire after the badge they got the wave from, plus 150–750 ms by signal to it. Every badge aligns to the shared wave start and keeps the shortest known path, so the wave also reaches badges out of the base's range.
 - **Remote trigger (base station):** Compatible `SyncPacket` with `mode` **1** (virus), **2** (rainbow / singularity look ~15 s), **3** (prime-party look ~12 s), **4** (wave / RSSI ripple ~4 s), **5** (beat pulse ~150 ms), **6** (RSSI zone colors ~5 s), **7** (ambient color ~30 s), **8** (strobe ~2 s). A fresh `virusID` per effect avoids re-triggering; while active, badges forward the same `mode` for swarm propagation.
 - **Nerves Controller (Raspberry Pi):** Optional Elixir/Nerves app (`herz_schwarm_nerves/`) controls the swarm via a USB ESP32 bridge (ESP-NOW). LiveView web-UI for effect control, beat tap-tempo, ambient color picker. Coexists with the base station on channel 13.
 
@@ -217,7 +217,7 @@ scripts/version.sh tag            # annotierten Tag setzen
 
 **Beispiel:** Code-Stand ist `1.2.0`, seit `v1.2.0.0` gab es 5 Commits → Tag `v1.2.0.5`. Nach Merge in `main` und Diskussion über ein neues Feature wird C auf `1` gesetzt → `1.2.1` → nächster Tag wird `v1.2.1.0`. Bump auf `1.3.0` (großes Feature) → C wieder auf `0` → `v1.3.0.0`. Bump auf `2.0.0` (Breaking Change) → kompletter Reset.
 
-**Aktueller Stand:** `1.3.0` (neu: „Badge finden“, Modus 9) — letzter Tag `v1.2.3.0`. Versionen aller Module: siehe *Versionen aller Module*.
+**Aktueller Stand:** `1.4.0` (neu: Welle läuft wirklich von der Basis nach außen) — letzter Tag `v1.3.0.0`. Versionen aller Module: siehe *Versionen aller Module*.
 
 **Änderungen v1.1.0 (Performance-Optimierung):**
 - `String` → `char[12]` für Morse-Puffer (kein Heap-Overhead)
@@ -240,7 +240,7 @@ Das A.B.C.D-Schema oben beschreibt **nur die Badge-Firmware** (`Herz_Schwarm_CCC
 
 | Modul | Datei | Define/Feld | Aktuell |
 |-------|-------|-------------|---------|
-| Badge (Schwarm) | `Herz_Schwarm_CCC_V.ino` | `FW_VERSION_MAJOR/MINOR/PATCH` | 1.3.0 |
+| Badge (Schwarm) | `Herz_Schwarm_CCC_V.ino` | `FW_VERSION_MAJOR/MINOR/PATCH` | 1.4.0 |
 | Basisstation | `Herz_Schwarm_BaseStation/Herz_Schwarm_BaseStation.ino` | `BASESTATION_FW_MAJOR/MINOR/PATCH` | 0.3.0 |
 | Bridge (Nerves-Adapter) | `herz_schwarm_nerves/firmware/esp32_bridge/esp32_bridge.ino` | `BRIDGE_FW_MAJOR/MINOR/PATCH` | 0.2.0 |
 | Nerves/Phoenix-App | `herz_schwarm_nerves/mix.exs` | `@version` | 0.1.2 |
@@ -255,7 +255,7 @@ Kompaktes `SyncPacket` (packed): `magic_id`, `beatCounter`, `virusID`, `mode` wi
 
 **Senderate:** Ab Badge-FW 1.2.1 broadcastet jedes Badge mit **20 Hz** (`SYNC_TX_INTERVAL_MS`, vorher 50 Hz = jeder Frame); bei einem Wechsel von `mode`/`virusID` wird sofort gesendet, damit sich Effekte ohne Verzögerung verbreiten. Das reduziert die Kanal-Last bei vielen Badges um 60 %.
 
-**`mode`-Werte (Badge & Basisstation):** `0` normal; `1` Virus-Animation; `2` Fern-Regenbogen; `3` Fern-Primzahl-Party; `4` Welle (RSSI-basierter Ripple, ~4 s); `5` Beat-Puls (weiss, ~150 ms); `6` RSSI-Zonen-Farben (rot/gelb/blau, ~5 s); `7` Ambient-Farbe (RGB aus `beatCounter`, ~30 s); `8` Strobe (weisse Blitze, ~2 s); `9` „Badge finden“ (ab Badge-FW 1.3.0: Paket = `SyncPacket` + **6 Byte Ziel-MAC**, 23 Byte; nur das Badge mit dieser STA-MAC blinkt 10 s grün mit voller Helligkeit, ältere Firmware ignoriert es). (Nur `1`…`9` lösen Effekte aus; `0` ist Standard nach den Effekt-Fenstern bzw. bei reiner Nähe-Logik.)
+**`mode`-Werte (Badge & Basisstation):** `0` normal; `1` Virus-Animation; `2` Fern-Regenbogen; `3` Fern-Primzahl-Party; `4` Welle (RSSI-/Hop-basierter Ripple, ~4 s; ab Badge-FW 1.4.0 hängen Badges 2× `uint16` an — ms seit Wellenstart und eigene Puls-Verzögerung, 21 Byte; Stationen senden weiter 17 Byte); `5` Beat-Puls (weiss, ~150 ms); `6` RSSI-Zonen-Farben (rot/gelb/blau, ~5 s); `7` Ambient-Farbe (RGB aus `beatCounter`, ~30 s); `8` Strobe (weisse Blitze, ~2 s); `9` „Badge finden“ (ab Badge-FW 1.3.0: Paket = `SyncPacket` + **6 Byte Ziel-MAC**, 23 Byte; nur das Badge mit dieser STA-MAC blinkt 10 s grün mit voller Helligkeit, ältere Firmware ignoriert es). (Nur `1`…`9` lösen Effekte aus; `0` ist Standard nach den Effekt-Fenstern bzw. bei reiner Nähe-Logik.)
 
 ---
 

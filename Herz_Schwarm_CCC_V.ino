@@ -27,7 +27,7 @@
  *              Commits seit 1.2.0 (oder seit letztem A.B.C-Wechsel).
  */
 #define FW_VERSION_MAJOR 1
-#define FW_VERSION_MINOR   3
+#define FW_VERSION_MINOR   4
 #define FW_VERSION_PATCH   0
 #define FW_DEBUG_BUILD     1  // Nur Debug-Zweig: bei sichtbarem neuen Debug-Stand +1, max 99
 
@@ -69,6 +69,10 @@
 #define REMOTE_PRIME_MS    12000
 #define WAVE_DURATION_MS   4000
 #define WAVE_PULSE_MS      700
+#define WAVE_MAX_DELAY_MS  (WAVE_DURATION_MS - WAVE_PULSE_MS)  // spätester Pulsbeginn nach Wellenstart
+#define WAVE_STATION_SPAN_MS 2000  // direkt von der Basis: -45 dBm → 0 ms … -95 dBm → 2000 ms
+#define WAVE_HOP_MIN_MS    150     // über ein Badge weitergeleitet: Sender-Verzögerung + 150 …
+#define WAVE_HOP_SPAN_MS   600     // … + 600 ms je nach Signal zum Sender
 #define BEAT_PULSE_MS      150
 #define REMOTE_ZONE_MS     5000
 #define REMOTE_AMBIENT_MS  30000
@@ -91,6 +95,10 @@
 // Identify-Pakete hängen 6 Byte Ziel-MAC an das SyncPacket an (17 + 6 = 23 Byte).
 // Ältere Firmware liest nur sizeof(SyncPacket) und kennt Modus 9 nicht → ignoriert.
 #define IDENTIFY_PACKET_LEN (sizeof(SyncPacket) + 6)
+// Wellen-Pakete von Badges (ab 1.4.0) hängen 2× uint16 an: ms seit Wellenstart an der Basis
+// und die eigene Puls-Verzögerung. Damit rechnet der Empfänger auf den gemeinsamen Start
+// zurück, statt beim Empfang neu zu beginnen. Ältere Firmware liest nur 17 Byte.
+#define WAVE_PACKET_LEN (sizeof(SyncPacket) + 4)
 
 struct __attribute__((packed)) SyncPacket {
     uint32_t magic_id;
@@ -151,10 +159,9 @@ static const uint32_t fxDurationMs[E_COUNT] = {
     BEAT_PULSE_MS, REMOTE_ZONE_MS, REMOTE_AMBIENT_MS, STROBE_DURATION_MS, IDENTIFY_MS
 };
 
-// Wave-spezifisch
+// Wave-spezifisch: fx[E_WAVE].startTime = Wellenstart an der Basis (lokale Zeit),
+// waveDelay = eigener Pulsbeginn danach (kürzester bekannter Weg, siehe OnDataRecv)
 uint32_t waveDelay = 0;
-bool waveReBroadcastDone = false;
-uint32_t waveReBroadcastAt = 0;
 
 // Ambient-spezifisch
 uint8_t ambientR = 0, ambientG = 0, ambientB = 0;
@@ -186,11 +193,16 @@ static void printFwVersionBanner() {
 
 static void sendSync(uint8_t mode, uint32_t fxId) {
     txData.magic_id = MAGIC_ID;
+    uint16_t waveInfo[2] = {0, 0};
     // Ambient: beatCounter trägt die Farbe (0xRRGGBB), sonst den Schwarm-Takt
     portENTER_CRITICAL(&stateMux);
     txData.beatCounter = (mode == SYNC_MODE_AMBIENT)
         ? ((uint32_t)ambientR << 16) | ((uint32_t)ambientG << 8) | ambientB
         : heartBeatState;
+    if (mode == SYNC_MODE_WAVE) {
+        waveInfo[0] = (uint16_t)(millis() - fx[E_WAVE].startTime);
+        waveInfo[1] = (uint16_t)waveDelay;
+    }
     portEXIT_CRITICAL(&stateMux);
     txData.virusID = fxId;
     txData.mode = mode;
@@ -203,7 +215,25 @@ static void sendSync(uint8_t mode, uint32_t fxId) {
     txData.ver_dbg = 0;
 #endif
     // Fehler ignorieren — nächster Sendezyklus sendet wieder
-    esp_now_send(broadcastMac, (uint8_t *)&txData, sizeof(txData));
+    if (mode == SYNC_MODE_WAVE) {
+        uint8_t buf[WAVE_PACKET_LEN];
+        memcpy(buf, &txData, sizeof(txData));
+        memcpy(buf + sizeof(txData), waveInfo, sizeof(waveInfo));
+        esp_now_send(broadcastMac, buf, sizeof(buf));
+    } else {
+        esp_now_send(broadcastMac, (uint8_t *)&txData, sizeof(txData));
+    }
+}
+
+// Pulsbeginn nach Wellenstart: direkt von der Basis nach deren Signal, sonst Verzögerung
+// des weiterleitenden Badges plus ein Aufschlag nach dem Signal zu ihm. So läuft die
+// Welle auch zu Badges, die die Basis gar nicht hören, in Hop-Schritten weiter.
+static uint32_t waveDelayFor(float rssi, bool fromStation, uint32_t senderDelay) {
+    float norm = (constrain(rssi, -95.0f, -45.0f) + 95.0f) / 50.0f;  // 0 = schwach, 1 = stark
+    uint32_t d = fromStation
+        ? (uint32_t)((1.0f - norm) * WAVE_STATION_SPAN_MS)
+        : senderDelay + WAVE_HOP_MIN_MS + (uint32_t)((1.0f - norm) * WAVE_HOP_SPAN_MS);
+    return d > WAVE_MAX_DELAY_MS ? WAVE_MAX_DELAY_MS : d;
 }
 
 // Puls-Helligkeit aus der gemeinsamen Schwarm-Phase (statt beatsin8, das mit dem
@@ -283,14 +313,31 @@ void OnDataRecv(const esp_now_recv_info_t *recv_info, const uint8_t *incomingDat
     if (rx.mode == SYNC_MODE_VIRUS)   FX_START(E_VIRUS,   rx.virusID);
     if (rx.mode == SYNC_MODE_RAINBOW) FX_START(E_RAINBOW, rx.virusID);
     if (rx.mode == SYNC_MODE_PRIME)   FX_START(E_PRIME,   rx.virusID);
-    if (rx.mode == SYNC_MODE_WAVE && rx.virusID != fx[E_WAVE].id) {
-        fx[E_WAVE].id = rx.virusID;
-        float inputRSSI = constrain(smoothRSSI, -95.0f, -45.0f);
-        float norm = (inputRSSI - (-95.0f)) / 50.0f;
-        waveDelay = (uint32_t)((1.0f - norm) * (float)(WAVE_DURATION_MS - WAVE_PULSE_MS));
-        fx[E_WAVE].startTime = now;
-        fx[E_WAVE].active = true;
-        waveReBroadcastDone = false;
+    if (rx.mode == SYNC_MODE_WAVE) {
+        // RSSI genau dieses Pakets (nicht smoothRSSI: der mittelt über alle Nachbarn).
+        // Badge-Pakete ab 1.4.0 tragen Laufzeit seit Wellenstart + Sender-Verzögerung;
+        // Station und ältere Badges nicht (Laufzeit 0, Sender-Verzögerung 0).
+        uint32_t elapsed = 0, senderDelay = 0;
+        if (!fromStation && len >= (int)WAVE_PACKET_LEN) {
+            uint16_t wi[2];
+            memcpy(wi, incomingData + sizeof(SyncPacket), sizeof(wi));
+            elapsed = wi[0];
+            senderDelay = wi[1];
+        }
+        uint32_t d = waveDelayFor(currentRSSI, fromStation, senderDelay);
+        if (rx.virusID != fx[E_WAVE].id) {
+            if (elapsed < WAVE_DURATION_MS) {  // sonst ist die Welle schon vorbei
+                fx[E_WAVE].id = rx.virusID;
+                fx[E_WAVE].startTime = now - elapsed;
+                fx[E_WAVE].active = true;
+                waveDelay = d;
+            }
+        } else if (fx[E_WAVE].active && d < waveDelay) {
+            // Kürzerer Weg (z. B. Basis direkt nach einer Weiterleitung): übernehmen,
+            // solange der eigene Puls noch nicht läuft.
+            uint32_t sinceStart = now - fx[E_WAVE].startTime;
+            if (sinceStart < waveDelay) waveDelay = d > sinceStart ? d : sinceStart;
+        }
     }
     if (rx.mode == SYNC_MODE_BEAT)    FX_START(E_BEAT,    rx.virusID);
     if (rx.mode == SYNC_MODE_ZONE)    FX_START(E_ZONE,    rx.virusID);
@@ -394,7 +441,6 @@ void loop() {
     static uint8_t modeBpm = 35;
     EffectState fs[E_COUNT];
     uint32_t waveDelayS;
-    bool waveStartRebroadcast;
     uint8_t ambR, ambG, ambB;
 
     // Kurz halten: nur Zählen, ein paar float-Operationen und Kopien, keine I/O.
@@ -446,14 +492,9 @@ void loop() {
     }
     waveDelayS = waveDelay;
     ambR = ambientR; ambG = ambientG; ambB = ambientB;
-    // Wave-Rebroadcast einmal pro Welle einplanen, sobald unser Puls dran ist
-    waveStartRebroadcast = fs[E_WAVE].active && !waveReBroadcastDone &&
-                           now - fs[E_WAVE].startTime >= waveDelay;
-    if (waveStartRebroadcast) waveReBroadcastDone = true;
 
     portEXIT_CRITICAL(&stateMux);
 
-    if (waveStartRebroadcast) waveReBroadcastAt = now + random(5, 25);
     uint8_t currentBright = BRIGHT_MIN + (uint8_t)(power * (BRIGHT_MAX - BRIGHT_MIN));
 
     // 5. ANIMATIONS-WEICHE
@@ -576,12 +617,8 @@ void loop() {
         if (!((heartMask64 >> i) & 1)) leds[i] = CRGB::Black;
     }
 
-    // 6. SENDEN (nicht-blockierend geplant für Wave-Rebroadcast)
-    if (waveReBroadcastAt != 0 && (int32_t)(now - waveReBroadcastAt) >= 0) {
-        sendSync(SYNC_MODE_WAVE, fs[E_WAVE].id);
-        waveReBroadcastAt = 0;
-    }
-
+    // 6. SENDEN — während der Welle trägt jedes Paket Wellenstart + eigene Verzögerung
+    // (sendSync), damit Nachbarn ihre Verzögerung daraus ableiten bzw. verkürzen.
     // Gedrosselt auf SYNC_TX_INTERVAL_MS; Effekt-/ID-Wechsel sofort, damit sich
     // Effekte ohne Verzögerung durch den Schwarm verbreiten.
     static uint32_t lastTx = 0;

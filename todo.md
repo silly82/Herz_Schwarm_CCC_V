@@ -1,9 +1,11 @@
 # Todo / Notizen (Projekt Herz-Schwarm)
 
-Stand: 2026-10-15 — Badge 1.3.0, Basisstation 0.3.0, Bridge 0.2.0, Nerves-App 0.1.2 (Versionen aller Module: README → *Versionen aller Module*).
+Stand: 2026-10-15 — Badge 1.4.0, Basisstation 0.3.0, Bridge 0.2.0, Nerves-App 0.1.2 (Versionen aller Module: README → *Versionen aller Module*).
 
 ## Offen
 
+- **Welle 1.4.0 im Feld testen:** bisher nur 1 Badge auf 1.4.0 (`a0:f2:62:ec:3b:b0`). Restliche 11 flashen,
+  dann mit vielen Badges in verschiedenen Abständen prüfen, ob die Welle sichtbar von Basis/Bridge nach außen läuft.
 - **Nerves-App** (`herz_schwarm_nerves/`, Details in `MAC_SETUP.md` → *Bekannte Bugs*):
   - Bandit 1.12.5: HTTP/2-Advisory EEF-CVE-2026-105659 ungefixt → HTTP/2 per Config aus; bei Fix updaten.
 - **Morse-Easter-Eggs:** bisher nur `-.-.` (Virus). Ideen: `...` → Regenbogen, `.-..` → Welle.
@@ -13,6 +15,7 @@ Stand: 2026-10-15 — Badge 1.3.0, Basisstation 0.3.0, Bridge 0.2.0, Nerves-App 
 
 ## Erledigt (Auszug)
 
+- Welle läuft von der Basis nach außen (RSSI des Wellen-Pakets statt smoothRSSI, Hop-Verzögerung, gemeinsamer Wellenstart), 1.4.0.
 - Schwarm-Puls wirklich synchron (gemeinsamer Phasen-Zähler statt lokalem `millis()`), 1.2.2.
 - Core-übergreifende Races in Badge und Basisstation, 1.2.3 / 0.2.2.
 - Basisstation: Modi 1–8, mDNS `herz-base.local`, `no_fs`-Partition (OTA-fähig), OTA-Upload, „Badge finden“.
