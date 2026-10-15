@@ -217,7 +217,7 @@ scripts/version.sh tag            # annotierten Tag setzen
 
 **Beispiel:** Code-Stand ist `1.2.0`, seit `v1.2.0.0` gab es 5 Commits → Tag `v1.2.0.5`. Nach Merge in `main` und Diskussion über ein neues Feature wird C auf `1` gesetzt → `1.2.1` → nächster Tag wird `v1.2.1.0`. Bump auf `1.3.0` (großes Feature) → C wieder auf `0` → `v1.3.0.0`. Bump auf `2.0.0` (Breaking Change) → kompletter Reset.
 
-**Aktueller Stand:** `1.2.0` (TUI als großes Feature in B) — `v1.1.0` war letzter Tag.
+**Aktueller Stand:** `1.2.3` (Bugfixes auf der 1.2-Linie: synchroner Schwarm-Puls, Peer-Tabelle, Core-übergreifende Races) — letzter Tag `v1.2.3.0`. Versionen aller Module: siehe *Versionen aller Module*.
 
 **Änderungen v1.1.0 (Performance-Optimierung):**
 - `String` → `char[12]` für Morse-Puffer (kein Heap-Overhead)
