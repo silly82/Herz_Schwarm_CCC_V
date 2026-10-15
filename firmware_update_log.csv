@@ -26,3 +26,5 @@ timestamp;firmware;port;result;mac
 2026-10-15 15:54:10 +0200;1.2.2;/dev/cu.usbmodem1101;ok;a0:f2:62:ec:3b:b0
 2026-10-15 15:54:28 +0200;1.2.2;/dev/cu.usbmodem1431401;ok;3c:0f:02:e4:6f:0c
 2026-10-15 15:54:45 +0200;1.2.2;/dev/cu.usbmodem143301;ok;a0:f2:62:ec:3b:b4
+2026-10-15 15:59:24 +0200;1.2.2;/dev/cu.usbmodem1431401;ok;34:b7:da:53:62:ec
+2026-10-15 15:59:44 +0200;1.2.2;/dev/cu.usbmodem143301;ok;34:b7:da:53:6b:c0
