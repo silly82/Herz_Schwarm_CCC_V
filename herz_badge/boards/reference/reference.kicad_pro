@@ -1,0 +1,43 @@
+{
+  "board": {
+    "design_settings": {
+      "rule_severities": {},
+      "rules": {}
+    }
+  },
+  "meta": {
+    "filename": "reference.kicad_pro",
+    "version": 1
+  },
+  "net_settings": {
+    "classes": [
+      {
+        "name": "Default",
+        "clearance": 0.15,
+        "track_width": 0.25,
+        "via_diameter": 0.6,
+        "via_drill": 0.3,
+        "microvia_diameter": 0.3,
+        "microvia_drill": 0.1,
+        "diff_pair_width": 0.2,
+        "diff_pair_gap": 0.25,
+        "diff_pair_via_gap": 0.25,
+        "wire_width": 6,
+        "bus_width": 12,
+        "line_style": 0,
+        "pcb_color": "rgba(0, 0, 0, 0.000)",
+        "schematic_color": "rgba(0, 0, 0, 0.000)",
+        "priority": 2147483647
+      }
+    ],
+    "meta": {
+      "version": 3
+    }
+  },
+  "sheets": [
+    [
+      "e0193382-ff47-400b-88f3-aefa91d0592e",
+      "Root"
+    ]
+  ]
+}

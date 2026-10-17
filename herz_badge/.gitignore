@@ -1,0 +1,12 @@
+build/
+*-backups/
+*.kicad_prl
+*.lck
+fp-info-cache
+__pycache__/
+.DS_Store
+
+# vendor datasheets: fetched by scripts/fetch_datasheets.py, summaries (*.md) are kept
+docs/datasheets/*.pdf
+# simulation scratch
+sim/vendor/
