@@ -1,0 +1,4 @@
+
+# Datasheet PDFs are large — regenerate with: bomi datasheet CXXXXX --pdf -o docs/datasheets/
+docs/datasheets/*.pdf
+docs/datasheets/*.PDF

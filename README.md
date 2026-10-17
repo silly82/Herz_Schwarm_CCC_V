@@ -24,6 +24,7 @@ Ein Schwarm von 8x8 LED Herz-Badges auf Basis der **Waveshare ESP32-S3-Matrix**.
 - **Pinout:** Die interne Matrix ist fest an **GPIO 14** verdrahtet. Die BOOT-Taste liegt auf **GPIO 0**.
 - **Farben:** Die verbauten LEDs nutzen die Reihenfolge **GRB** (bitte im Code anpassen).
 - **Sicherheit:** Da die Rückseite des Boards offene Kontakte hat, wird dringend empfohlen, diese mit Klebeband (Kapton) zu isolieren oder ein Gehäuse zu verwenden.
+- **Eigene Hardware:** `herz_badge/` enthält das KiCad-Projekt für ein akkubetriebenes Badge (Waveshare-Schaltplan nachgezeichnet, Akku-Version platziert, noch nicht geroutet). Siehe `herz_badge/README.md`.
 
 ---
 
@@ -46,6 +47,7 @@ A swarm of 8x8 LED heart badges based on the **Waveshare ESP32-S3-Matrix**. They
 - **Pinout:** Internal matrix is wired to **GPIO 14**. BOOT button is on **GPIO 0**.
 - **Color Order:** The LEDs use **GRB** order (ensure this is set in the code).
 - **Safety:** As the back of the board has exposed contacts, it is highly recommended to insulate it with tape (Kapton) or use a 3D-printed case.
+- **Own hardware:** `herz_badge/` holds the KiCad project for a battery-powered badge (the Waveshare schematic redrawn, the battery version placed, not yet routed). See `herz_badge/README.md`.
 
 ### Build, flash & serial monitor (Arduino CLI)
 - **FQBN:** `esp32:esp32:esp32s3` — sketch folder = repository root (`Herz_Schwarm_CCC_V.ino`). Port: `arduino-cli board list`.
