@@ -2,8 +2,10 @@
 
 Status (2026-10-17): reference reverse-engineered and redrawn (`boards/reference/`, netlist identical to the
 vendor's). Battery badge (`boards/badge/`): datasheets summarised, power path simulated (`sim/`), parts revised
-after both (D12–D16), placed on 30 × 34 mm, 4 layers, not routed; order files for a JLC quote. Next: the quote,
-a real badge measured (section 8), the firmware changes of D17, then routing.
+after both (D12–D16), placed on 30 × 34 mm, 4 layers, not routed; order files for a JLC quote. Battery safety
+reviewed 2026-10-18 (section 5): rules for cells and mounting (D18, D19), and a fuse, an NTC and a connector move
+proposed for routing. Next: the quote, a real badge measured (section 9), the firmware changes of D17, the section 5
+proposals decided, then routing.
 
 ## 1. Requirements
 
@@ -14,6 +16,8 @@ a real badge measured (section 8), the firmware changes of D17, then routing.
 - **R4 Off switch.** Cuts the load completely for storage and transport; charging still works when off.
 - **R5 Battery voltage.** Firmware can read it, for a low-battery warning and a brightness cap on battery.
 - **R6 Made at JLC.** Assembled at JLC from stocked parts; Basic parts where the function allows.
+- **R7 Safe at a camp.** No single fault starts a fire. That covers a short on the board, a bad or reversed cell,
+  charging in heat or cold, and a crushed cell. Cells, labels and disposal follow EU and Swiss rules (section 5).
 - Wanted: keep the IMU (tilt effects, wake on motion later). Not needed: the 2×10 header (no firmware uses it).
 
 ## 2. The reference board
@@ -47,7 +51,7 @@ Bluetooth With QST Attitude Gyro Sensor QMI8658C". Sources:
 LED chain (the order the firmware addresses): U8, U7 … U1, then U16 … U9, U24 … U17, and so on to U65 … U58; each
 schematic row is eight LEDs and ends in DOUT_1 … DOUT_7. Where index 0 sits, and whether the rows run the same way
 (row-major) or alternate (serpentine), is not in the schematic. The firmware treats `i / 8` as the row; its heart is
-mirror-symmetric in every row, so it would look right either way. Measure it (section 8) before placing the clone's
+mirror-symmetric in every row, so it would look right either way. Measure it (section 9) before placing the clone's
 LEDs.
 
 ### 2.2 GPIO use
@@ -108,12 +112,23 @@ Runtime from full to VSW = 3.4 V (the proposed firmware shutdown), simulated in 
 
 | Cell | Quiet | Typical crowd | Packed crowd | Typical, brightness capped at 60 on battery |
 | --- | --- | --- | --- | --- |
-| 103030, 1000 mAh (CHF 0.68–1.19) | 7.5 h | 4.1 h | 2.6 h | 6.0 h |
+| 103030, 1000 mAh as listed (real cells: below) | 7.5 h | 4.1 h | 2.6 h | 6.0 h |
 | 102030, 600 mAh | 4.5 h | 2.5 h | 1.5 h | 3.6 h |
 | 25 × 30 mm, 350 mAh | 2.6 h | 1.4 h | 0.9 h | 2.1 h |
 
-The 1000 mAh cell meets the 5–8 h target only with the brightness cap on battery (D17); the radio's 90 mA
-floor is the next lever (listen windows locked to the shared beat), not needed for the target. The cell's
+Real 103030 cells hold less than 1000 mAh. Makers that publish datasheets rate the size at 800–900 mAh, and with
+its protection board it measures about 10.5 × 30.5 × 32–33 mm (battery report,
+`research_notes/Badge battery options/suppliers_asia.md`). The same simulation, with cell resistances assumed:
+
+| Cell | Typical, capped at 60 | Quiet / typical / packed, uncapped |
+| --- | --- | --- |
+| 850 mAh | 5.1 h | 6.4 / 3.5 / 2.2 h |
+| 900 mAh | 5.4 h | 6.8 / 3.7 / 2.3 h |
+| 103035, about 1100 mAh, 37 mm long with its board, so it needs a 37 mm board | 6.6 h | 8.3 / 4.5 / 2.9 h |
+
+With the brightness cap on battery (D17), a real 850–900 mAh 103030 just reaches the 5 h end of the 5–8 h target;
+without the cap, no cell that fits does. The next lever is the radio's 90 mA floor (listen windows locked to the
+shared beat; the mesh report estimates 25–50 mA, about 8–10 h). The other lever is a longer board for a 103035. The cell's
 open-circuit curve and internal resistance in the model are typical values; a measured discharge of the chosen
 cell should replace them.
 
@@ -157,7 +172,43 @@ USB D± ── USBLC6-2SC6 ── 22 Ω ── GPIO19/20
 - **Kept:** GPIO0 BOOT, GPIO14 LED data, the chain order, IMU on GPIO10–13 (address 0x6B, SA0 low), the USB pins,
   RESET. GPIO45 stays unconnected: it must be low at reset for the 3.3 V in-package flash.
 
-## 5. Parts (JLC stock and price checked 2026-10-17 with bomi)
+## 5. Battery safety
+
+The 1000 mAh cell stores 3.7 Wh. Behind its 0.12 Ω internal resistance (`sim/model.py`) it can push well over 10 A
+into a short. Hundreds of people will wear the badge, charge it in tents and carry it in bags. WHY2025's badge was
+declared a fire hazard during the event ([advisory](https://wiki.why2025.org/Badge/Fire_hazard)):
+- its two 18650 cells had no protection;
+- traces ran 0.4 mm from ground under 10–30 µm of solder mask;
+- in a 20 A test the protection reacted too slowly.
+
+The aim here is R7: no single fault starts a fire. The faults covered are a short on the board, a bad cell, a hot
+tent and a crushed pouch. Rules for buying, labelling, transport and disposal are in
+[the battery report](../reports/Badge%20battery%20options.md).
+
+| # | Hazard | The badge now | Required (D18, D19) | Proposed for routing |
+| --- | --- | --- | --- | --- |
+| 1 | A short on the board side: a solder bridge, a cracked capacitor, a metal lanyard clip across bare pads | No fuse: only the cell's protection circuit (PCM) opens a short. The pads of TP201–TP204 (TX, RX, 3V3, GND), J102 and U101 are bare on the back under the cell | Protected cells only, with a PCM trip test on samples from every batch (D18); an insulating sheet over the back (D19) | F101: a 2 A fast-acting 1206 fuse between J102 pin 2 and Q103. Littelfuse 0466002.NRHF (C3105): 31 mΩ cold, $0.05–0.07, Extended, 31k stock. It drops about 40 mV in a white flash (1.3 A). A dead short of the cell (10–35 A) opens it within a few ms (melting I²t 0.23 A²s). Re-run `sim/flash_sag.py` with the 31 mΩ before adding it |
+| 2 | An unprotected, reversed or mislabelled cell | Q103 blocks a reversed cell only while USB is unplugged (D12) | Cells bought with a PCM and with the JST fitted pin 2 = +; meter every cell before plugging it in (D5, D18) | — |
+| 3 | Charging below 0 °C or above 45 °C: a badge in a tent in the sun, or plugged in straight from a cold car at Congress | TEMP is tied to GND, so the TP4056 does not check temperature (datasheet p3) | — | An NTC on TEMP, needed for IEC 62368-1 M.4.2 (below): Murata NCP15XH103F03RC (C77131, 10 kΩ, B 3380 K, 0402, $0.02, 306k stock), under the middle of the cell and away from U101, D101 and U201. Use 5.6 kΩ from VBUS to TEMP and 120 kΩ from TEMP to GND. The TP4056 pauses charging when TEMP leaves 45–80 % of VCC (p13–14); these values put the limits at about 0.5 °C and 46 °C. The divider draws 0.34 mA, and only from USB. Li-ion is not charged below freezing or fast-charged above 45 °C ([BU-410](http://www.batteryuniversity.com/article/bu-410-charging-at-high-and-low-temperatures/)) |
+| 4 | Heat into the cell while charging | U101 (up to 0.55 W, `sim/charge.py`) and D101 (up to 1.4 A on USB) sit on the back under the cell, with nothing between them and the pouch | The sheet and spacer of D19 | Move U101, R103 and D101 out of the cell's outline if routing allows. Either way, measure the cell surface over U101 during a full charge (section 9) |
+| 5 | Charge current too high for the cell | 400 mA (R103 = 3.0 kΩ) | Cells of 800 mAh or more whose datasheet allows at least 0.5C charge; 400 mA is 0.4C for 1000 mAh. A smaller cell needs a new R103: 400 mA into section 3's 350 mAh cell is 1.1C | — |
+| 6 | Discharge beyond the cell's rating | White flash: 1.18 A plus about 0.1 A. Full white: 2.3 A (section 3) | A cell rated for at least 1C continuous; a PCM over-current trip at 2 A or more, so a flash does not cut the badge off; the power limit of D17 | — |
+| 7 | Over-discharge after the event | Deep sleep at VSW 3.4 V (D17) is not off. An estimated 0.18–0.28 mA still flows: the ME6217 (100 µA typical, more near dropout, datasheet p4, p7), 64 dark LEDs (64 µA), the ESP32-S3 (8 µA, p63), plus the IMU and the level shifter. The 4 % left at 3.4 V (about 40 mAh, `sim/model.py`) lasts one to two weeks. Then the PCM disconnects, and the cell keeps self-discharging. Switched off (Q102 open), only the VBAT divider (2 µA), the TP4056 (≤ 1 µA, p5) and the PCM draw current | The off switch is the storage and transport state: the handout card says so. Store at about 40–60 % charge; ship by air at 30 % or less (IATA, also for cells packed with equipment since 2026) | Measure both currents (section 9). If deep sleep is well above 0.2 mA, let the firmware switch the matrix supply |
+| 8 | A crushed, punctured or bent pouch | With the cell flush to the top edge, its 30 × 30 mm outline covers two connectors. J102 is a side-entry JST PH, 5.5 mm tall (datasheet p3). J101's USB-C shell reaches about 4 mm into the outline (y 25.7–35.2). A cell laid flat rests on both connector edges, and a lanyard pull presses it onto them | A spacer at least as thick as the tallest part under the cell, so the pouch lies on a flat face, over a polyimide sheet on the board (D19). Keep pressure off the cell's PCM tab and leads. Tape the leads down on the cell, so the plug carries no strain | Move J102 out of the cell's outline: into the bottom strip, or to the right edge below y 30. The cell can then lie on a thin pad. Check the USB-C overlap at the same time |
+| 9 | Swelling with age, overcharge or heat | Nothing constrains the cell or watches it | Leave the cell room to grow: no clamping case. Retire any cell that is puffy, dented or hot | — |
+| 10 | A cell the user cannot change. EU 2023/1542 Art. 11 applies to badges placed on the EU market from 18 Feb 2027, which covers a summer 2027 camp but not the December 2026 Congress | The cell is on a JST plug, which is fine. Prying a pouch off strong foam tape can bend or puncture it, and the Commission's guidelines ask for removal without damage to the battery or the device (C(2026) 5032) | Hold the cell with a reusable fastener: hook-and-loop on the spacer (as MCH2022 did), a strap, or stretch-release strips (D19). Publish removal instructions online, and keep spare cells (and fasteners, if they are not reusable) for 5 years after the last badge (Art. 11(7)) | — |
+
+Two standards shape the proposals above:
+- **IEC 62368-1 Annex M.4.2**, for the badge as an end product, requires charging to stop above the cell's
+  charge-temperature limit, even under a single fault. With TEMP tied to GND the badge cannot meet it, so the NTC
+  of hazard 3 is needed for any safety claim, not just nice to have.
+- **EU 2023/1542** also requires a crossed-out bin on the cell itself, about 5 mm square on a 30 × 30 mm face. That
+  belongs in the cell order (D18).
+
+Who places the badges on the EU market is an organisational question, not a board one. It needs an EU-based
+operator. See `research_notes/Badge battery options/regulations.md`.
+
+## 6. Parts (JLC stock and price checked 2026-10-17 with bomi)
 
 The chosen parts are in BOM.md with prices at production quantities; datasheet summaries in `docs/datasheets/`.
 Second sources and alternatives kept in view:
@@ -172,7 +223,7 @@ Second sources and alternatives kept in view:
 | USB ESD | ST USBLC6-2SC6 C7519 (35k) | TECH PUBLIC C2827654 (58k) | the copy is rated 5.0 V |
 | Crystal | JGHC 40 MHz 3225 C426988 (2,390) | any 3225 40 MHz, 10 pF load | thin stock |
 
-## 6. Decisions
+## 7. Decisions
 
 | # | Date | Decision | Why |
 | --- | --- | --- | --- |
@@ -193,8 +244,10 @@ Second sources and alternatives kept in view:
 | D15 | 2026-10-17 | Antenna: Walsin RFANT3216120A5T (C127629) with 6.8 nH series (L203, at the antenna) in a 6 × 6 mm corner keep-out, replacing the RFECA3216060A1T (D6) | the only candidate whose datasheet layout is a corner of a small board (20 × 45 mm, 6 × 6 mm clearance, p3); the RFECA3216060A1T wants a mid-edge cut-out with 30 mm of ground along the edge, which the badge does not have. Stock (3,773) covers about 1000 boards; runner-up Kinghelm KH5220-A36 (docs/datasheets/antennas.md) |
 | D16 | 2026-10-17 | Crystal caps 12 pF (was 10 pF); ST's USBLC6-2SC6 (C7519) instead of the TECH PUBLIC copy | the crystal is listed with a 10 pF load: 12 pF per side plus about 4 pF of board gives 10 pF. The copy's working voltage is 5.0 V, VBUS may be 5.25 V |
 | D17 | 2026-10-17 | Firmware for the battery badge: cap brightness at 60 on battery (VBUS_SENSE low), `FastLED.setMaxPowerInVoltsAndMilliamps(4, 800)` always, deep sleep below VSW 3.4 V (read VBAT on GPIO1) | the cap gives 6.0 h typical on 1000 mAh (4.1 h without); the power limit keeps a white flash below the JST's and D101's ratings; 3.4 V keeps the LEDs above their 3.3 V minimum |
+| D18 | 2026-10-18 | Buy only cells that meet all of these: a protection circuit (overcharge, over-discharge, over-current trip at 2 A or more, short circuit); a datasheet allowing at least 0.5C charge and 1C continuous discharge; a UN 38.3 test summary and an IEC 62133-2 test report for the exact model; the crossed-out bin and the capacity printed on the cell; the JST PH fitted with pin 2 = +. Check every batch. Every cell: dimensions, polarity and open-circuit voltage. Samples: PCM short-circuit and over-current trip, and a capacity test | the board has no fuse, and Q103 covers a reversed cell only without USB, so the PCM is the only short protection (section 5); WHY2025 handed out unprotected cells |
+| D19 | 2026-10-18 | Between the board and the cell: a polyimide sheet over the whole back, then a closed-cell foam spacer as thick as the tallest part under the cell (J102, 5.5 mm), so the pouch lies flat. The spacer is stuck to the board. The cell is held to the spacer by a reusable fastener (hook-and-loop, a strap, or stretch-release strips), not permanent tape. Tape the cell's leads down on the cell side | bare 3V3, GND and VBAT pads, a 5.5 mm connector and the USB-C shell all sit inside the cell's outline (section 5, hazards 1 and 8); from 18 Feb 2027 the user must be able to change the cell without damaging it (hazard 10) |
 
-## 7. Block designs (badge)
+## 8. Block designs (badge)
 
 Generated by `scripts/sch_badge.py`; designators 1xx power, 2xx MCU, 3xx LEDs (D301 is chain index 0).
 
@@ -217,9 +270,15 @@ Generated by `scripts/sch_badge.py`; designators 1xx power, 2xx MCU, 3xx LEDs (D
 GPIO: 0 BOOT, 1 VBAT_SENSE, 2 VBUS_SENSE, 10–13 IMU (INT1, SDA, SCL, INT2), 14 LED data, 19/20 USB, 43/44 TX/RX.
 The firmware needs nothing new to run; battery and charge readings are new code.
 
-## 8. To measure on a real badge
+## 9. To measure on a real badge
 
 - LED pitch, the corner where chain index 0 sits, and whether rows alternate direction (light LEDs 0, 1, 8 alone).
 - Board thickness, USB-C type (mid-mount or top-mount), crystal package, button part.
 - Current from a USB meter: idle, heart at minimum and maximum proximity, virus flash. This replaces the estimates
   in section 3.
+
+On the first battery badges (section 5):
+
+- Cell current in deep sleep at VSW 3.4 V, and switched off (hazard 7).
+- Cell surface temperature over U101 during a full charge at 25 °C, with the D19 stack in place (hazard 4).
+- The chosen cell's PCM: the over-current trip with a white flash running, and the short-circuit cut-off (D18).
