@@ -78,6 +78,34 @@ body {
 .btn-stop { background: linear-gradient(135deg, #374151, #1f2937); box-shadow: 0 2px 12px rgba(0, 0, 0, 0.3); }
 .btn-go { background: linear-gradient(135deg, #10b981, #059669); box-shadow: 0 2px 12px rgba(16, 185, 129, 0.3); }
 
+.warn-banner {
+  background: #451a03;
+  border: 1px solid var(--warn);
+  border-radius: 12px;
+  color: #fde68a;
+  padding: 0.75rem 1rem;
+}
+
+.row-offline { opacity: 0.45; }
+
+.sparkline { color: var(--cyan); flex-shrink: 0; }
+
+.log-scroll { max-height: 26rem; overflow-y: auto; }
+
+.log-line {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  padding: 0.2rem 0;
+  border-bottom: 1px solid var(--bd);
+}
+
+.log-level { font-weight: 700; min-width: 2.75rem; }
+.log-debug { color: #6b7280; }
+.log-info { color: #d1d5db; }
+.log-warn { color: var(--warn); }
+.log-error { color: #fca5a5; }
+
 input[type="range"] {
   -webkit-appearance: none;
   appearance: none;

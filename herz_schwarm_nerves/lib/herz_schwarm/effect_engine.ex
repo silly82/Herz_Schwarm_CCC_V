@@ -10,7 +10,7 @@ defmodule HerzSchwarm.EffectEngine do
   require Logger
   import Bitwise
 
-  alias HerzSchwarm.Bridge
+  alias HerzSchwarm.{Bridge, EventLog, Metrics}
 
   @pubsub HerzSchwarm.PubSub
   @topic "effect:state"
@@ -25,6 +25,11 @@ defmodule HerzSchwarm.EffectEngine do
     :wave_id,
     :wave_running
   ]
+
+  # Funk-Modus 10 = Welle stoppen (ID der Welle), Modus 12 = ALLE Effekte
+  # global stoppen (SYNC_MODE_STOP_ALL, virusID = 0, kein ID-Ziel).
+  @mode_wave_stop 10
+  @mode_stop_all 12
 
   # Mode names for UI
   @mode_names %{
@@ -52,12 +57,23 @@ defmodule HerzSchwarm.EffectEngine do
 
   @doc "Manuell die laufende Welle (Modus 4) stoppen (sendet Modus 10)."
   def stop_wave do
-    GenServer.cast(__MODULE__, {:trigger, 10, []})
+    GenServer.cast(__MODULE__, {:trigger, @mode_wave_stop, []})
   end
 
-  @doc "Set BPM for the beat engine (60-180). Set to 0 to stop."
+  @doc """
+  Setzt nur den Tempo-Wert (0-300 BPM). Startet den Beat NICHT.
+
+  - Beat inaktiv: nur der Wert wird gespeichert, kein Timer.
+  - Beat aktiv: der laufende Timer wird mit dem neuen Intervall neu geplant.
+  - `0`: stoppt den Beat (Wert wird auf 0 gesetzt).
+  """
   def set_bpm(bpm) when bpm >= 0 and bpm <= 300 do
     GenServer.cast(__MODULE__, {:set_bpm, bpm})
+  end
+
+  @doc "Startet den Beat mit dem angegebenen Tempo (1-300 BPM)."
+  def start_beat(bpm) when bpm >= 1 and bpm <= 300 do
+    GenServer.cast(__MODULE__, {:start_beat, bpm})
   end
 
   @doc "Manual beat trigger (tap-tempo style)."
@@ -70,7 +86,10 @@ defmodule HerzSchwarm.EffectEngine do
     GenServer.cast(__MODULE__, {:set_color, r, g, b})
   end
 
-  @doc "Stop all effects (return to normal)."
+  @doc """
+  Alle Effekte auf den Badges stoppen (sendet immer Modus 12, auch ohne
+  laufende Welle). Beendet zusätzlich Welle und Beat lokal.
+  """
   def stop_all do
     GenServer.cast(__MODULE__, :stop_all)
   end
@@ -118,7 +137,7 @@ defmodule HerzSchwarm.EffectEngine do
       case mode do
         7 ->
           {r, g, b} = Keyword.get(opts, :color, state.color)
-          (r <<< 16) ||| (g <<< 8) ||| b
+          r <<< 16 ||| g <<< 8 ||| b
 
         _ ->
           System.os_time(:millisecond)
@@ -131,13 +150,15 @@ defmodule HerzSchwarm.EffectEngine do
       beatCounter: beat_counter
     }
 
-    Bridge.send_command(cmd)
+    send_cmd(cmd)
+    count_trigger(mode)
 
     # Mode 10 = Welle stoppen: danach ist kein Effekt mehr aktiv.
     # wave_id bleibt erhalten, damit mehrfaches Stoppen funktioniert.
-    active_mode = if mode == 10, do: 0, else: mode
+    active_mode = if mode == @mode_wave_stop, do: 0, else: mode
     wave_id = if mode == 4, do: id, else: state.wave_id
     wave_running = wave_running_after(mode, state.wave_running)
+
     state = %{
       state
       | active_mode: active_mode,
@@ -151,6 +172,7 @@ defmodule HerzSchwarm.EffectEngine do
     {:noreply, state}
   end
 
+  # Stopp: Beat aus, Tempo auf 0.
   def handle_cast({:set_bpm, 0}, state) do
     state = cancel_beat_timer(state)
     state = %{state | bpm: 0, beat_active: false}
@@ -158,11 +180,24 @@ defmodule HerzSchwarm.EffectEngine do
     {:noreply, state}
   end
 
-  def handle_cast({:set_bpm, bpm}, state) do
+  # Nur Tempo: startet den Beat nie. Läuft er bereits, wird der Takt angepasst.
+  def handle_cast({:set_bpm, bpm}, %{beat_active: true} = state) do
     state = cancel_beat_timer(state)
-    interval_ms = div(60_000, bpm)
-    timer = Process.send_after(self(), :beat_tick, interval_ms)
-    state = %{state | bpm: bpm, beat_active: true, beat_timer: timer}
+    state = schedule_beat(%{state | bpm: bpm})
+    broadcast_state(state)
+    {:noreply, state}
+  end
+
+  def handle_cast({:set_bpm, bpm}, state) do
+    state = %{state | bpm: bpm}
+    broadcast_state(state)
+    {:noreply, state}
+  end
+
+  # Einziger Pfad, der den Beat startet.
+  def handle_cast({:start_beat, bpm}, state) do
+    state = cancel_beat_timer(state)
+    state = schedule_beat(%{state | bpm: bpm, beat_active: true})
     broadcast_state(state)
     {:noreply, state}
   end
@@ -177,7 +212,8 @@ defmodule HerzSchwarm.EffectEngine do
       beatCounter: System.os_time(:millisecond)
     }
 
-    Bridge.send_command(cmd)
+    send_cmd(cmd)
+    Metrics.increment(:triggers)
     state = %{state | active_mode: 5, active_id: id}
     broadcast_state(state)
     {:noreply, state}
@@ -190,10 +226,10 @@ defmodule HerzSchwarm.EffectEngine do
   end
 
   def handle_cast(:stop_all, state) do
-    # Läuft eine Welle, muss sie auf den Badges explizit gestoppt werden
-    if state.wave_running do
-      Bridge.send_command(wave_stop_cmd(state.wave_id || 0))
-    end
+    # Modus 12 immer senden: stoppt alle Effekte und die Welle auf den Badges.
+    # Fehler (z. B. Bridge getrennt) werden in send_cmd/1 geloggt, nicht geworfen.
+    send_cmd(stop_all_cmd())
+    if state.wave_running, do: Metrics.increment(:wave_stops)
 
     state = cancel_beat_timer(state)
 
@@ -220,11 +256,10 @@ defmodule HerzSchwarm.EffectEngine do
       beatCounter: System.os_time(:millisecond)
     }
 
-    Bridge.send_command(cmd)
+    send_cmd(cmd)
+    Metrics.increment(:triggers)
 
-    interval_ms = div(60_000, bpm)
-    timer = Process.send_after(self(), :beat_tick, interval_ms)
-    state = %{state | active_mode: 5, active_id: id, beat_timer: timer}
+    state = schedule_beat(%{state | active_mode: 5, active_id: id})
     broadcast_state(state)
     {:noreply, state}
   end
@@ -233,31 +268,71 @@ defmodule HerzSchwarm.EffectEngine do
     {:noreply, %{state | beat_timer: nil}}
   end
 
+  # Plant den nächsten beat_tick gemäß state.bpm (muss > 0 sein).
+  defp schedule_beat(%{bpm: bpm} = state) do
+    timer = Process.send_after(self(), :beat_tick, div(60_000, bpm))
+    %{state | beat_active: true, beat_timer: timer}
+  end
+
   # Cancel any pending beat_tick, draining any already-queued message.
   # This avoids a race where :beat_tick fires after set_bpm(0) and re-arms.
   defp cancel_beat_timer(state) do
     case state.beat_timer do
-      nil -> state
+      nil ->
+        state
+
       ref ->
         Process.cancel_timer(ref)
         # Drain any :beat_tick already in the mailbox
         receive do
           :beat_tick -> :ok
-        after 0 -> :ok
+        after
+          0 -> :ok
         end
+
         %{state | beat_timer: nil}
     end
   end
 
+  # Sendet ein Kommando und zaehlt es (nur bei erfolgreichem Versand).
+  defp send_cmd(cmd) do
+    case Bridge.send_command(cmd) do
+      {:ok, _seq} = ok ->
+        Metrics.increment(:commands_sent)
+        ok
+
+      other ->
+        EventLog.log(:debug, "effect", "Kommando nicht gesendet: #{inspect(other)}")
+        other
+    end
+  end
+
+  defp count_trigger(mode) do
+    Metrics.increment(:triggers)
+
+    case mode do
+      4 -> Metrics.increment(:wave_starts)
+      10 -> Metrics.increment(:wave_stops)
+      9 -> Metrics.increment(:identifies)
+      _ -> :ok
+    end
+  end
+
+  # Welle (4) startet sie; Stopp (10) und alle Modi, die die Welle auf den
+  # Badges verdraengen ("letzter Effekt gewinnt"), beenden sie. Beat (5) und
+  # Identify (9) lassen die Welle unberuehrt.
   defp wave_running_after(4, _running), do: true
-  defp wave_running_after(10, _running), do: false
+
+  defp wave_running_after(mode, _running) when mode in [1, 2, 3, 6, 7, 8, 10, 12], do: false
+
   defp wave_running_after(_mode, running), do: running
 
-  defp wave_stop_cmd(wave_id) do
+  # Modus 12 = alle Effekte global stoppen, kein ID-Ziel (virusID 0).
+  defp stop_all_cmd do
     %{
       cmd: "effect",
-      mode: 10,
-      virusID: wave_id,
+      mode: @mode_stop_all,
+      virusID: 0,
       beatCounter: System.os_time(:millisecond)
     }
   end

@@ -41,7 +41,7 @@ defmodule HerzSchwarmWeb.BridgeUpdateLiveTest do
     assert html =~ ~r/id="bridge-fw-link"[^>]*>\s*Bridge-FW 0\.3\.0 \(OTA: writing\)/
     assert html =~ ~s(href="/bridge-update")
     # bestehende Bedienelemente sind noch da
-    assert html =~ "Alle Effekte stoppen"
+    assert html =~ "Alle Effekte auf den Badges stoppen"
     assert html =~ "Welle senden"
     assert html =~ "Beat-Steuerung"
   end

@@ -7,3 +7,5 @@ config :herz_schwarm, HerzSchwarmWeb.Endpoint,
 
 config :logger, level: :warning
 config :herz_schwarm, bridge_enabled: false
+# Tests schreiben nie in ~/.local/share (Persistenz in Tests ueber start_supervised mit :path).
+config :herz_schwarm, tap_store_path: nil

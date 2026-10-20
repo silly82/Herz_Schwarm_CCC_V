@@ -18,7 +18,8 @@ config :herz_schwarm, HerzSchwarmWeb.Endpoint,
 config :esbuild,
   version: "0.21.5",
   herz_schwarm: [
-    args: ~w(js/app.js --bundle --target=es2017 --outdir=../priv/static/assets --external:/fonts/* --external:/images/*),
+    args:
+      ~w(js/app.js --bundle --target=es2017 --outdir=../priv/static/assets --external:/fonts/* --external:/images/*),
     cd: Path.expand("../assets", __DIR__),
     env: %{"NODE_PATH" => Path.expand("../deps", __DIR__)}
   ]
@@ -34,8 +35,21 @@ config :tailwind,
     cd: Path.expand("../assets", __DIR__)
   ]
 
-
 # Bridge-Port: kein Default hier. HerzSchwarm.Bridge ermittelt ihn zur Laufzeit
 # (UART_DEVICE-Env > config :uart_device > Auto-Detect per status/pong-Probe).
+
+# Monitoring (HerzSchwarm.Metrics / HerzSchwarm.Bridge):
+#  - rssi_warn_threshold: RSSI (dBm) darunter gilt ein Badge als "schwach"
+#  - badge_offline_after_s: Sekunden ohne Lebenszeichen bis "offline"
+#  - ack_timeout_ms: so lange wartet die Bridge-Verfolgung auf ack/err je Kommando
+config :herz_schwarm,
+  rssi_warn_threshold: -85,
+  badge_offline_after_s: 20,
+  ack_timeout_ms: 1_500
+
+# Tap-Counter (HerzSchwarm.TapCounter): JSON-Datei mit den Badge-Staenden.
+#  - tap_store_path: Pfad (nil = keine Persistenz, z. B. in test.exs)
+config :herz_schwarm,
+  tap_store_path: "~/.local/share/herz-schwarm/taps.json"
 
 import_config "#{config_env()}.exs"

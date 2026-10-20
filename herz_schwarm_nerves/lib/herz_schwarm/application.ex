@@ -8,6 +8,9 @@ defmodule HerzSchwarm.Application do
     children =
       [
         {Phoenix.PubSub, name: HerzSchwarm.PubSub},
+        HerzSchwarm.Metrics,
+        HerzSchwarm.EventLog,
+        HerzSchwarm.TapCounter,
         HerzSchwarm.Bridge,
         HerzSchwarm.EffectEngine,
         HerzSchwarm.PeerTracker,

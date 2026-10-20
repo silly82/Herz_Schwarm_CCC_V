@@ -6,6 +6,12 @@ defmodule HerzSchwarm.PeerTracker do
   Peer-Liste: die Bridge (FW >= 0.2.0) antwortet auf "peers" mit je einer
   "peer"-Zeile und einer abschliessenden "peers"-Zeile; erst dann wird die
   gesammelte Liste uebernommen (keine halben Listen in der UI).
+
+  Monitoring: jedes `peer`-Event geht (mit RSSI, FW und Alter) an
+  `HerzSchwarm.Metrics`. Ein Sweep (1 s) vergleicht `Metrics.offline_badges/0`
+  mit dem zuletzt bekannten Stand und protokolliert Verschwinden (`:warn`) und
+  Wiederkehr (`:info`) im `HerzSchwarm.EventLog`. Waehrend die Bridge getrennt
+  ist, wird nicht gesweept (sonst wuerden alle Badges als verschwunden gemeldet).
   """
 
   use GenServer
@@ -15,9 +21,21 @@ defmodule HerzSchwarm.PeerTracker do
   @bridge_topic "bridge:events"
   @topic "peers:count"
 
-  alias HerzSchwarm.Bridge
+  @sweep_ms 1_000
 
-  defstruct [:bridge_connected, :peer_count, :last_pong, peers: [], pending: []]
+  # Obergrenze fuer einen Peer-Batch (mehr Badges gibt es im Schwarm nicht).
+  @max_peers 64
+
+  alias HerzSchwarm.{Bridge, EventLog, Metrics}
+
+  defstruct [
+    :bridge_connected,
+    :peer_count,
+    :last_pong,
+    peers: [],
+    pending: [],
+    offline: MapSet.new()
+  ]
 
   # --- Public API ---
 
@@ -39,8 +57,13 @@ defmodule HerzSchwarm.PeerTracker do
     mac = String.upcase(mac)
 
     if Regex.match?(~r/\A[0-9A-F]{2}(:[0-9A-F]{2}){5}\z/, mac) do
-      Bridge.send_command(%{cmd: "identify", mac: mac})
-      :ok
+      # Fehler (z. B. Bridge getrennt) werden durchgereicht, damit die UI sie anzeigen kann.
+      with {:ok, _seq} <- Bridge.send_command(%{cmd: "identify", mac: mac}) do
+        Metrics.increment(:identifies)
+        Metrics.increment(:commands_sent)
+        EventLog.log(:info, "peer", "Identify gesendet an #{mac}")
+        :ok
+      end
     else
       {:error, :invalid_mac}
     end
@@ -51,6 +74,7 @@ defmodule HerzSchwarm.PeerTracker do
   @impl true
   def init(_opts) do
     Phoenix.PubSub.subscribe(@pubsub, @bridge_topic)
+    Process.send_after(self(), :sweep, @sweep_ms)
 
     state = %__MODULE__{
       bridge_connected: false,
@@ -63,7 +87,7 @@ defmodule HerzSchwarm.PeerTracker do
 
   @impl true
   def handle_call(:get_status, _from, state) do
-    {:reply, Map.from_struct(state), state}
+    {:reply, state |> Map.from_struct() |> Map.delete(:offline), state}
   end
 
   @impl true
@@ -81,7 +105,8 @@ defmodule HerzSchwarm.PeerTracker do
         peer_count: 0,
         last_pong: nil,
         peers: [],
-        pending: []
+        pending: [],
+        offline: MapSet.new()
     }
 
     broadcast_status(state)
@@ -89,12 +114,16 @@ defmodule HerzSchwarm.PeerTracker do
   end
 
   def handle_info({:bridge, %{"evt" => "pong"} = pong}, state) do
-    # Fix: a pong implies the bridge is alive — also set bridge_connected
+    # Die Bridge antwortet auf einen Poll zuerst mit pong (status), dann mit den
+    # peer-Zeilen. Ein pong markiert also den Beginn eines neuen Batches: ein
+    # unvollstaendiger Rest eines frueheren Polls (verlorener "peers"-Marker) wird verworfen.
+    # Ein pong impliziert zudem, dass die Bridge lebt: bridge_connected setzen.
     state = %{
       state
       | bridge_connected: true,
         peer_count: pong["peers"] || 0,
-        last_pong: pong
+        last_pong: pong,
+        pending: []
     }
 
     broadcast_status(state)
@@ -103,7 +132,14 @@ defmodule HerzSchwarm.PeerTracker do
 
   def handle_info({:bridge, %{"evt" => "peer", "mac" => mac} = p}, state) do
     peer = %{mac: mac, rssi: p["rssi"], fw: p["fw"] || "?", age_ms: p["age"]}
-    {:noreply, %{state | pending: [peer | state.pending]}}
+    Metrics.add_rssi(mac, p["rssi"], p["fw"], p["age"])
+
+    # Dedup nach MAC (letzter Wert gewinnt), Batch hart auf @max_peers begrenzt (neueste bleiben).
+    pending =
+      [peer | Enum.reject(state.pending, &(&1.mac == mac))]
+      |> Enum.take(@max_peers)
+
+    {:noreply, %{state | pending: pending}}
   end
 
   def handle_info({:bridge, %{"evt" => "peers"}}, state) do
@@ -115,6 +151,30 @@ defmodule HerzSchwarm.PeerTracker do
 
   def handle_info({:bridge, _event}, state) do
     {:noreply, state}
+  end
+
+  def handle_info(:sweep, state) do
+    Process.send_after(self(), :sweep, @sweep_ms)
+    {:noreply, if(state.bridge_connected, do: sweep_offline(state), else: state)}
+  end
+
+  # Offline-Uebergaenge protokollieren (nur Aenderungen gegenueber dem letzten Sweep).
+  defp sweep_offline(state) do
+    offline = MapSet.new(Metrics.offline_badges())
+
+    for mac <- MapSet.difference(offline, state.offline) do
+      EventLog.log(
+        :warn,
+        "peer",
+        "Badge #{mac} nicht mehr erreichbar (> #{Metrics.badge_offline_after_s()} s ohne Signal)"
+      )
+    end
+
+    for mac <- MapSet.difference(state.offline, offline), Metrics.badge_online?(mac) do
+      EventLog.log(:info, "peer", "Badge #{mac} wieder online")
+    end
+
+    %{state | offline: offline}
   end
 
   defp broadcast_status(state) do
