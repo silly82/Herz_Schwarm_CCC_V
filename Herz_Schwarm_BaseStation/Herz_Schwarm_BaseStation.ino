@@ -58,12 +58,15 @@
 #define SYNC_MODE_MAX        8   // Badge-FW kennt Modi 1..8
 #define SYNC_MODE_AMBIENT    7   // Farbe als 0xRRGGBB im beatCounter
 #define SYNC_MODE_IDENTIFY   9   // "Badge finden": SyncPacket + 6 Byte Ziel-MAC
+#define SYNC_MODE_WAVE_STOP  10  // Welle manuell stoppen; ausserhalb von SYNC_MODE_MAX (Sonderfall)
 #define IDENTIFY_REPEATS     3   // Funk ist verlustbehaftet; Badge dedupliziert per virusID
+#define WAVE_STOP_REPEATS    3   // Stopp-Broadcast mehrfach senden (wie Identify)
+#define WAVE_STOP_GAP_MS     60
 #define HOSTNAME             "herz-base"
 
 #define BASESTATION_FW_MAJOR 0
 #define BASESTATION_FW_MINOR     3
-#define BASESTATION_FW_PATCH     0
+#define BASESTATION_FW_PATCH     1
 
 #define MQTT_NS "hs_mqtt"
 #define MQTT_HOST_DEF    "192.168.1.10"
@@ -119,6 +122,13 @@ static Preferences mqttPrefs;
 static NetworkClient mqttNet;
 static PubSubClient mqtt(mqttNet);
 static uint32_t lastMqttPublish = 0;
+
+// Welle läuft (mode 4 gesendet, noch kein Stopp) — nur für den Web-UI-Toggle
+static bool waveRunning = false;
+static uint32_t lastWaveId = 0;  // ID der zuletzt gestarteten Welle (Ziel-ID im Stopp-Paket); bleibt nach Stopp erhalten
+// ID der zuletzt gestoppten Welle: weitergeleitete Pakete dieser ID setzen waveRunning nicht wieder.
+// Nur Vergleich über ID-Gleichheit, wird beim Start nicht gelöscht.
+static uint32_t waveStopId = 0;
 
 static void sendEffectBroadcast(uint8_t mode, uint32_t beatCounter);
 static bool sendIdentify(const uint8_t *mac);
@@ -255,6 +265,15 @@ void OnDataRecv(const esp_now_recv_info_t *recv_info, const uint8_t *data, int l
 
     int8_t rssi = recv_info->rx_ctrl->rssi;
     updatePeer(recv_info->src_addr, rssi, hasVer, rx.ver_major, rx.ver_minor, rx.ver_rel, rx.ver_dbg);
+
+    // Wellenzustand aus weitergeleiteten Badge-Paketen lernen (auch für Wellen aus Nerves)
+    if (rx.mode == 4 && rx.virusID != waveStopId) {  // 4 = Welle
+        waveRunning = true;
+        lastWaveId = rx.virusID;
+    } else if (rx.mode == SYNC_MODE_WAVE_STOP) {
+        waveRunning = false;
+        waveStopId = (rx.virusID != 0) ? rx.virusID : lastWaveId;
+    }
 }
 
 static void appendMac(char *buf, size_t buflen, size_t *off, const uint8_t *mac) {
@@ -276,11 +295,11 @@ static uint32_t parseHexColor(const char *s) {
     return (uint32_t)v;
 }
 
-// POST /api/effect?m=1..8[&c=RRGGBB]  (c nur für m=7 Ambient)
+// POST /api/effect?m=1..8|10[&c=RRGGBB]  (c nur für m=7 Ambient, m=10 = Welle stoppen)
 static void handleEffect() {
     long m = server.arg("m").toInt();
-    if (m < 1 || m > SYNC_MODE_MAX) {
-        server.send(400, "text/plain", "m muss 1-8 sein");
+    if ((m < 1 || m > SYNC_MODE_MAX) && m != SYNC_MODE_WAVE_STOP) {
+        server.send(400, "text/plain", "m muss 1-8 oder 10 sein");
         return;
     }
     uint32_t beat = (m == SYNC_MODE_AMBIENT) ? parseHexColor(server.arg("c").c_str()) : millis();
@@ -338,7 +357,7 @@ static void mqttBuildClientId(char *cid, size_t clen) {
 }
 
 // Payload: leer → Virus (kompatibel zu früher); "N" → Modus N (1..8);
-// "7:RRGGBB" → Ambient-Farbe.
+// "10" → Welle stoppen; "7:RRGGBB" → Ambient-Farbe.
 static void mqttCallback(char *topic, byte *payload, unsigned int len) {
     if (strcmp(topic, mqttCfg.topicCmd) != 0) return;
     char buf[16];
@@ -346,7 +365,7 @@ static void mqttCallback(char *topic, byte *payload, unsigned int len) {
     memcpy(buf, payload, n);
     buf[n] = '\0';
     long m = n ? strtol(buf, nullptr, 10) : 1;
-    if (m < 1 || m > SYNC_MODE_MAX) {
+    if ((m < 1 || m > SYNC_MODE_MAX) && m != SYNC_MODE_WAVE_STOP) {
         Serial.printf("MQTT cmd ignoriert: \"%s\"\n", buf);
         return;
     }
@@ -541,7 +560,7 @@ footer code{background:#12121a;padding:.12rem .35rem;border-radius:6px;border:1p
 <button type="button" class="btn" onclick="doEffect(1)">&#x26A1; Virus (wei&szlig;)</button>
 <button type="button" class="btn btn-rb" onclick="doEffect(2)">&#x1F308; Regenbogen</button>
 <button type="button" class="btn btn-pr" onclick="doEffect(3)">&#x2728; Primzahl-Party</button>
-<button type="button" class="btn btn-wv" onclick="doEffect(4)">&#x1F30A; Welle</button>
+<button type="button" class="btn btn-wv" id="wvbtn" onclick="doEffect(wave?10:4)">&#x1F30A; Welle</button>
 </div>
 <div class="btn-row">
 <button type="button" class="btn btn-bt" onclick="doEffect(5)">&#x1F941; Beat</button>
@@ -593,7 +612,7 @@ footer code{background:#12121a;padding:.12rem .35rem;border-radius:6px;border:1p
 <p class="warn" id="otadef" style="display:none">&#x26A0;&#xFE0F; Standard-OTA-Passwort aktiv &mdash; eigenes in <code>ota_secret.h</code> setzen und neu flashen.</p>
 </div>
 <footer>
-&#x1F4CB; API: <code>GET /api/peers</code> &middot; <code>GET/POST /api/mqtt</code> &middot; <code>POST /api/effect?m=1&hellip;8[&amp;c=RRGGBB]</code> &middot; <code>POST /api/identify?mac=&hellip;</code> &middot; <code>POST /api/ota</code><br>
+&#x1F4CB; API: <code>GET /api/peers</code> &middot; <code>GET/POST /api/mqtt</code> &middot; <code>POST /api/effect?m=1&hellip;8[&amp;c=RRGGBB]</code> (<code>m=10</code> Welle stoppen) &middot; <code>POST /api/identify?mac=&hellip;</code> &middot; <code>POST /api/ota</code><br>
 &#x2728; CCC Herz-Schwarm &mdash; HTTP ist unverschl&uuml;sselt; MQTT-Zugang nur im lokalen Netz setzen.
 </footer>
 </div>
@@ -633,6 +652,7 @@ async function load(){
  try{
   var r=await fetch('/api/peers');var j=await r.json();
   document.getElementById('sfw').textContent=j.station||'?';
+  if(j.wave!==wave)setWave(!!j.wave);
   document.getElementById('cnt').textContent=j.n;
   var best=null;
   if(j.peers&&j.peers.length){j.peers.forEach(function(p){if(best===null||p.rssi>best)best=p.rssi;});}
@@ -674,6 +694,12 @@ document.getElementById('otaf').addEventListener('submit',function(ev){
  x.onerror=function(){m.textContent='\u274C Verbindung abgebrochen';m.style.color='#ff6b6b';};
  x.send(fd);
 });
+var wave=false;
+function setWave(on){
+ wave=on;
+ document.getElementById('wvbtn').innerHTML=on?'&#x23F9;&#xFE0F; Welle stoppen':'&#x1F30A; Welle';
+ document.getElementById('wvbtn').style.outline=on?'2px solid #fff':'none';
+}
 async function doEffect(mode){
  var m=document.getElementById('msg');
  m.textContent='\u23F3 Sende\u2026';m.style.color='var(--warn)';
@@ -681,6 +707,7 @@ async function doEffect(mode){
  if(mode===7)q+='&c='+encodeURIComponent(document.getElementById('ambc').value.slice(1));
  try{var r=await fetch('/api/effect?'+q,{method:'POST'});var t=await r.text();
   m.textContent=(r.ok?'\u2705 ':'\u274C ')+t;m.style.color=r.ok?'var(--cyan)':'#ff6b6b';
+  if(r.ok&&(mode===4||mode===10))setWave(mode===4);
  }catch(e){m.textContent='\u274C '+e;m.style.color='#ff6b6b';}
 }
 document.getElementById('mqttf').addEventListener('submit',async function(ev){
@@ -717,8 +744,9 @@ static void handleApiPeersTable() {
     char json[3072];
     size_t o = 0;
     o += snprintf(json + o, sizeof(json) - o,
-                  "{\"station\":\"%u.%u.%u\",\"ota_default\":%s,\"mqtt\":{\"enabled\":%s,\"connected\":%s},\"n\":%d,\"peers\":[",
+                  "{\"station\":\"%u.%u.%u\",\"wave\":%s,\"ota_default\":%s,\"mqtt\":{\"enabled\":%s,\"connected\":%s},\"n\":%d,\"peers\":[",
                   BASESTATION_FW_MAJOR, BASESTATION_FW_MINOR, BASESTATION_FW_PATCH,
+                  waveRunning ? "true" : "false",
                   OTA_PASSWORD_IS_DEFAULT ? "true" : "false",
                   mqttCfg.enabled ? "true" : "false",
                   (mqttCfg.enabled && mqtt.connected()) ? "true" : "false",
@@ -842,12 +870,30 @@ static void handleOtaDone() {
 }
 
 static void sendEffectBroadcast(uint8_t mode, uint32_t beatCounter) {
-    if (mode < 1 || mode > SYNC_MODE_MAX) mode = 1;
+    if (mode != SYNC_MODE_WAVE_STOP && (mode < 1 || mode > SYNC_MODE_MAX)) mode = 1;
     SyncPacket pkt = makeSyncPacket(mode, beatCounter);
-    if (esp_now_send(broadcastMac, (uint8_t *)&pkt, sizeof(pkt)) != ESP_OK) {
+    // Stopp trägt die ID der laufenden Welle (0 = unbekannt, Badges stoppen dann ihre lokale Welle)
+    if (mode == SYNC_MODE_WAVE_STOP) pkt.virusID = lastWaveId;
+    // Stopp-Welle 3× im Abstand; Badges leiten den Stopp selbst begrenzt weiter
+    int repeats = (mode == SYNC_MODE_WAVE_STOP) ? WAVE_STOP_REPEATS : 1;
+    bool ok = false;
+    for (int i = 0; i < repeats; i++) {
+        if (i) delay(WAVE_STOP_GAP_MS);
+        ok |= (esp_now_send(broadcastMac, (uint8_t *)&pkt, sizeof(pkt)) == ESP_OK);
+    }
+    if (!ok) {
         Serial.println("esp_now_send effect failed");
     } else {
         Serial.printf("Effect broadcast mode=%u id=%lu\n", (unsigned)mode, (unsigned long)pkt.virusID);
+        if (mode == 4) {
+            waveRunning = true;
+            lastWaveId = pkt.virusID;
+        }
+        // waveStopId merken, damit verspätete mode-4-Pakete dieser Welle den UI-Zustand nicht wieder auf "läuft" setzen
+        if (mode == SYNC_MODE_WAVE_STOP) {
+            waveRunning = false;
+            waveStopId = pkt.virusID;
+        }
     }
 }
 

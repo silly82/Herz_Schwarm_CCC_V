@@ -1,4 +1,7 @@
 # Board-Optionen für `arduino-cli compile/upload` ohne --fqbn.
 # CDCOnBoot=cdc ist Pflicht: Die Bridge spricht JSON über Serial, das bei
 # ESP32-S3 mit nativem USB sonst auf UART0 statt auf dem USB-Kabel landet.
-default_fqbn: esp32:esp32:esp32s3:CDCOnBoot=cdc
+# PartitionScheme=min_spiffs: zwei App-Slots à ~1,9 MB (ota_0/ota_1) für das
+# UART-OTA aus der Nerves-App. Ein bereits geflashtes Gerät muss einmalig per
+# USB mit diesem Schema (inkl. Partitionstabelle) neu geflasht werden.
+default_fqbn: esp32:esp32:esp32s3:CDCOnBoot=cdc,PartitionScheme=min_spiffs

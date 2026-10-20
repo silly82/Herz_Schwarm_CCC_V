@@ -15,7 +15,16 @@ defmodule HerzSchwarm.EffectEngine do
   @pubsub HerzSchwarm.PubSub
   @topic "effect:state"
 
-  defstruct [:active_mode, :active_id, :bpm, :beat_active, :beat_timer, :color]
+  defstruct [
+    :active_mode,
+    :active_id,
+    :bpm,
+    :beat_active,
+    :beat_timer,
+    :color,
+    :wave_id,
+    :wave_running
+  ]
 
   # Mode names for UI
   @mode_names %{
@@ -39,6 +48,11 @@ defmodule HerzSchwarm.EffectEngine do
   @doc "Trigger an effect mode (1-8). Options: beatCounter for mode 7."
   def trigger_effect(mode, opts \\ []) when mode in 1..8 do
     GenServer.cast(__MODULE__, {:trigger, mode, opts})
+  end
+
+  @doc "Manuell die laufende Welle (Modus 4) stoppen (sendet Modus 10)."
+  def stop_wave do
+    GenServer.cast(__MODULE__, {:trigger, 10, []})
   end
 
   @doc "Set BPM for the beat engine (60-180). Set to 0 to stop."
@@ -82,7 +96,9 @@ defmodule HerzSchwarm.EffectEngine do
       bpm: 0,
       beat_active: false,
       beat_timer: nil,
-      color: {100, 150, 255}
+      color: {100, 150, 255},
+      wave_id: nil,
+      wave_running: false
     }
 
     {:ok, state}
@@ -90,21 +106,13 @@ defmodule HerzSchwarm.EffectEngine do
 
   @impl true
   def handle_call(:get_state, _from, state) do
-    snapshot = %{
-      active_mode: state.active_mode,
-      active_id: state.active_id,
-      bpm: state.bpm,
-      beat_active: state.beat_active,
-      color: state.color,
-      mode_name: mode_name(state.active_mode)
-    }
-
-    {:reply, snapshot, state}
+    {:reply, snapshot(state), state}
   end
 
   @impl true
   def handle_cast({:trigger, mode, opts}, state) do
-    id = System.unique_integer([:positive])
+    # Stopp (10) nutzt die ID der laufenden Welle, sonst eine neue ID
+    id = if mode == 10, do: state.wave_id || 0, else: System.unique_integer([:positive])
 
     beat_counter =
       case mode do
@@ -125,7 +133,19 @@ defmodule HerzSchwarm.EffectEngine do
 
     Bridge.send_command(cmd)
 
-    state = %{state | active_mode: mode, active_id: id}
+    # Mode 10 = Welle stoppen: danach ist kein Effekt mehr aktiv.
+    # wave_id bleibt erhalten, damit mehrfaches Stoppen funktioniert.
+    active_mode = if mode == 10, do: 0, else: mode
+    wave_id = if mode == 4, do: id, else: state.wave_id
+    wave_running = wave_running_after(mode, state.wave_running)
+    state = %{
+      state
+      | active_mode: active_mode,
+        active_id: id,
+        wave_id: wave_id,
+        wave_running: wave_running
+    }
+
     broadcast_state(state)
 
     {:noreply, state}
@@ -170,8 +190,21 @@ defmodule HerzSchwarm.EffectEngine do
   end
 
   def handle_cast(:stop_all, state) do
+    # Läuft eine Welle, muss sie auf den Badges explizit gestoppt werden
+    if state.wave_running do
+      Bridge.send_command(wave_stop_cmd(state.wave_id || 0))
+    end
+
     state = cancel_beat_timer(state)
-    state = %{state | active_mode: 0, active_id: 0, beat_active: false}
+
+    state = %{
+      state
+      | active_mode: 0,
+        active_id: 0,
+        beat_active: false,
+        wave_running: false
+    }
+
     broadcast_state(state)
     {:noreply, state}
   end
@@ -216,16 +249,32 @@ defmodule HerzSchwarm.EffectEngine do
     end
   end
 
-  defp broadcast_state(state) do
-    snapshot = %{
+  defp wave_running_after(4, _running), do: true
+  defp wave_running_after(10, _running), do: false
+  defp wave_running_after(_mode, running), do: running
+
+  defp wave_stop_cmd(wave_id) do
+    %{
+      cmd: "effect",
+      mode: 10,
+      virusID: wave_id,
+      beatCounter: System.os_time(:millisecond)
+    }
+  end
+
+  defp snapshot(state) do
+    %{
       active_mode: state.active_mode,
       active_id: state.active_id,
       bpm: state.bpm,
       beat_active: state.beat_active,
       color: state.color,
+      wave_running: state.wave_running,
       mode_name: mode_name(state.active_mode)
     }
+  end
 
-    Phoenix.PubSub.broadcast(@pubsub, @topic, {:effect, snapshot})
+  defp broadcast_state(state) do
+    Phoenix.PubSub.broadcast(@pubsub, @topic, {:effect, snapshot(state)})
   end
 end

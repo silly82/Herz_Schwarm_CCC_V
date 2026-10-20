@@ -52,6 +52,8 @@ arduino-cli upload -p /dev/cu.usbmodem14101 herz_schwarm_nerves/firmware/esp32_b
 
 **Wichtig bei ESP32-S3 mit nativem USB:** `CDCOnBoot=cdc` ist Pflicht — ohne geht `Serial` auf UART0 statt auf das USB-Kabel, und die Bridge antwortet am Mac/Pi nicht. `sketch.yaml` setzt das automatisch, solange kein eigenes `--fqbn` übergeben wird (für den C6 unten wird `--fqbn` explizit gesetzt und überschreibt die Datei).
 
+**Neu ab Bridge 0.3.0 — Partition-Schema:** `sketch.yaml` setzt zusätzlich `PartitionScheme=min_spiffs` (zwei App-Slots à ~1,9 MB, `ota_0`/`ota_1`) — Voraussetzung für das UART-OTA aus dem Dashboard (Abschnitt „Bridge-Update über das Dashboard"). **Ein bereits geflashtes Gerät muss einmalig per USB mit diesem Sketch nachgezogen werden**, dabei wird die Partitionstabelle mitgeschrieben; erst danach funktioniert OTA. Ohne OTA-Slot schlägt `Update.begin` fehl und die Update-Seite zeigt die Fehlermeldung. Beim C6/C3-Flash unten (explizites `--fqbn`) gehört `PartitionScheme=min_spiffs` in den FQBN, sonst greift `sketch.yaml` nicht und OTA ist nicht möglich.
+
 Der Port `/dev/cu.usbmodem14101` ist exemplarisch — `arduino-cli board list` zeigt deinen echten. **Sicherstellen, dass der ESP32 kein Badge-Sketch drauf hat**, sondern die `esp32_bridge.ino`.
 
 ## App starten
@@ -262,6 +264,8 @@ pip3 install --user pyserial
      herz_schwarm_nerves/firmware/esp32_bridge/
    ```
 
+   Achtung: das explizite `--fqbn` überschreibt `sketch.yaml` — ohne `PartitionScheme=min_spiffs` im FQBN gibt es keine OTA-Slots und UART-OTA ist unmöglich (für OTA `esp32:esp32:esp32c6:PartitionScheme=min_spiffs` setzen; bereits geflashte Geräte brauchen den ersten Flash mit dem neuen Schema einmal per USB, siehe „Bridge flashen (einmalig)“).
+
 4. **Verifizieren** (Serial-Log "bridge ready" sollte erscheinen):
 
    ```bash
@@ -317,6 +321,7 @@ UART_DEVICE=/dev/cu.usbmodem14101 mix phx.server
 - Hauptmenü: 8 Effekt-Buttons, BPM-Slider, Tap-Beat, Ambient-Color-Picker
 - Live-Updates via PubSub (kein Polling, WebSocket)
 - Bridge-Status + Peer-Count in Header
+- Ab App 0.2.0: Header zeigt die Bridge-Firmware-Version (aus `pong`, bei Bridge < 0.3.0 `?`) und verlinkt die Seite **`/bridge-update`** (siehe „Bridge-Update über das Dashboard“)
 
 ## UART-Device auf Mac
 
@@ -381,6 +386,66 @@ das Dashboard zeigt die Liste mit „🔎 Finden“-Button (`HerzSchwarm.PeerTra
 **Peer-Count:** `{"evt":"pong","peers":N,...}` liefert jetzt die echte Anzahl zuletzt aktiver Stationen (vorher immer `0`, das Feld wurde nie gesetzt). Der Pi pollt `{"cmd":"status"}` alle 5s automatisch (`HerzSchwarm.Bridge`), das Dashboard zeigt den Wert live über `PeerTracker`.
 
 **Für Stations-Firmware ohne eigenen SyncPacket-Broadcast** (separates Repo, nicht hier): nach Empfang eines validen `SyncPacket` ein `AckPacket{magic_id: 0x421337CC, virusID: <empfangene virusID>}` per `esp_now_send()` unicast an die Absender-MAC zurücksenden. Die Bridge-MAC muss dafür einmalig als ESP-NOW-Peer registriert werden (unverschlüsselt, Kanal 13).
+
+## UART-OTA-Kommandos der Bridge (ab Bridge 0.3.0 / App 0.2.0)
+
+Alle Kommandos laufen über die bestehende Serial-Verbindung (115200 Baud, newline-JSON,
+max. 256 Byte pro Zeile — deshalb sind Chunks auf 96 Rohbytes begrenzt):
+
+| Kommando | Beispiel (Pi → Bridge) | Wirkung auf der Bridge |
+|----------|------------------------|------------------------|
+| `ota_begin` | `{"cmd":"ota_begin","seq":7,"size":904880}` | `Update.begin(size)` — löscht den Ziel-Slot (kann 1–3 s dauern), dann `ack`; optional-Feld `ver` nur informativ |
+| `ota_chunk` | `{"cmd":"ota_chunk","seq":8,"off":0,"data":"<base64, 96 Rohbytes>"}` | `Update.write`; pro Chunk genau ein `ack`/`err`; `off` = bisher geschriebene Rohbytes, strikt sequenziell — die Wiederholung des letzten Chunks wird idempotent nur bestätigt |
+| `ota_end` | `{"cmd":"ota_end","seq":9}` | `Update.end(true)` (prüft die Image-Prüfsumme), `ack`, dann Neustart der Bridge |
+| `ota_abort` | `{"cmd":"ota_abort","seq":10}` | verwirft das Update (`Update.abort`), Zustand zurück `idle`, `ack` |
+
+`pong` (Antwort auf `{"cmd":"status","seq":N}`) meldet ab 0.3.0 zwei zusätzliche Felder —
+`{"evt":"pong","peers":5,"uptime":12345,"free_heap":200000,"fw":"0.3.0","ota":"idle"}`:
+`fw` = Bridge-Firmware-Version, `ota` = `idle` | `writing` | `error`. Ältere Bridges senden beide Felder nicht.
+
+**Während eines Updates:** `effect` antwortet mit `err` `busy: ota`; `status` und `peers` laufen weiter.
+Bleiben Chunks/Kommandos aus, verwirft die Bridge ein verwaistes Update nach **30 s** automatisch
+(`Update.abort`, Log `ota timeout, aborted`; `pong` zeigt danach `ota:"error"`, Effekte sind wieder möglich).
+
+**Bekannte Grenzen:** keine eigene Prüfsumme pro Chunk — die Integrität prüft `Update.end` über die
+Image-Prüfsumme; die Dateiprüfung der App akzeptiert nur `.bin` mit ESP-Magic-Byte `0xE9`; der reale
+OTA-Ablauf auf Hardware ist noch nicht getestet (Stand 0.3.0).
+
+## Bridge-Update über das Dashboard (`/bridge-update`, ab App 0.2.0 / Bridge 0.3.0)
+
+Die Bridge hat kein WLAN/Ethernet — ihr Firmware-Update läuft per UART-OTA über das bestehende
+USB-Kabel aus der Web-UI (anderer Weg als die Basisstation, die per HTTP-Upload in ihrer eigenen
+Web-UI aktualisiert wird). Die Seite ist im Dashboard-Header verlinkt, der auch die Bridge-Version
+zeigt (aus dem `fw`-Feld des `pong`, `?` bei Bridge < 0.3.0).
+
+**Voraussetzungen:**
+- App ≥ 0.2.0 und Bridge-Firmware ≥ 0.3.0 (ältere Bridges melden weder Version noch OTA-Zustand)
+- Neues Partition-Schema `min_spiffs` auf der Bridge — bei einem bestehenden Gerät zuerst **einmalig
+  per USB flashen** (siehe „Bridge flashen (einmalig)“), sonst schlägt `Update.begin` fehl und die
+  Seite zeigt die Fehlermeldung
+
+**Datei:** die Sketch-`.bin` aus dem Build (≈ 900 kB, z. B. `esp32_bridge.ino.bin`, erzeugt mit
+`arduino-cli compile --export-binaries herz_schwarm_nerves/firmware/esp32_bridge/`) — **nicht** die
+`.merged.bin` und nicht den Bootloader. Max. 2 MB, Formatprüfung: ESP-Magic-Byte `0xE9`.
+
+**Ablauf:** Datei auswählen → „▶ Update starten“. Die App überträgt strikt sequenziell in 96-Byte-Chunks
+(immer genau ein offenes Kommando, Zuordnung über `seq`): 1000 ms Timeout pro Chunk, max. 3 Wiederholungen,
+danach automatischer Abbruch (`ota_abort`); `ota_begin` und `ota_end` haben 20 s Timeout ohne Wiederholung;
+Gesamt-Timeout 10 min. Der Fortschrittsbalken zeigt Prozent + Bytes. Grobe Faustregel laut Implementierer:
+~5–7 kB/s → ca. **2,5–4 min** für ein ~900 kB-Image. Nach `ota_end` startet die Bridge neu, die App
+verbindet sich über ihre normale Reconnect-Logik wieder.
+
+**⚠️ Während des Updates die Bridge nicht vom Strom trennen.**
+
+**Abbruch / Fehler:** „⏹ Abbrechen“ sendet `ota_abort` (Zustand sofort `idle`). Verbindungsabbruch oder
+Timeout zeigt die Seite als Fehlermeldung; das verwaiste Update räumt die Bridge nach 30 s ohne Verkehr
+selbst zurück (`Update.abort`) — danach sind Effekte wieder möglich, ein USB-Neustart ist nur nötig, wenn
+die Bridge selbst nicht mehr hochkommt.
+
+**⚠️ Sicherheitshinweis:** Die Update-Seite hat **keinen Login** — jeder, der die App im Netz erreicht,
+kann eine Bridge-Firmware hochladen und flashen. Die App nur in einem vertrauenswürdigen Netz betreiben
+oder den Zugriff auf Netzwerkebene beschränken (Firewall/VPN/LAN-Segment); einen Login gibt es bewusst
+noch nicht — im Gegensatz zur OTA der Basisstation, die HTTP Basic Auth nutzt.
 
 ## Production-Build (für Raspberry Pi 4)
 

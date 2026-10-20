@@ -28,7 +28,7 @@
  */
 #define FW_VERSION_MAJOR 1
 #define FW_VERSION_MINOR   4
-#define FW_VERSION_PATCH   0
+#define FW_VERSION_PATCH   1  // 1.4.1: Welle läuft endlos (Zyklus 4 s) bis Stopp über Modus 10
 #define FW_DEBUG_BUILD     1  // Nur Debug-Zweig: bei sichtbarem neuen Debug-Stand +1, max 99
 
 #if FW_DEBUG_BUILD < 1 || FW_DEBUG_BUILD > 99
@@ -65,9 +65,13 @@
 #define SYNC_MODE_AMBIENT  7  // Feste Farbe (alle LEDs)
 #define SYNC_MODE_STROBE   8  // Strobe-Blitz
 #define SYNC_MODE_IDENTIFY 9  // "Badge finden": nur das Badge mit der Ziel-MAC blinkt grün
+#define SYNC_MODE_WAVE_STOP 10 // Welle manuell stoppen (Welle läuft sonst endlos im 4-s-Zyklus)
 #define REMOTE_RAINBOW_MS  15000
 #define REMOTE_PRIME_MS    12000
-#define WAVE_DURATION_MS   4000
+#define WAVE_DURATION_MS   4000    // Länge eines Wellenzyklus; die Welle wiederholt ihn endlos bis zum Stopp
+#define WAVE_STOP_FWD_COUNT  3     // Stopp-Paket wird max. so oft weitergeleitet …
+#define WAVE_STOP_FWD_GAP_MS 60    // … im Abstand von ~60 ms (nicht blockierend, aus loop())
+#define WAVE_STOP_LOCK_MS    1000  // danach keine erneute Weiterleitung (kein Echo-Sturm)
 #define WAVE_PULSE_MS      700
 #define WAVE_MAX_DELAY_MS  (WAVE_DURATION_MS - WAVE_PULSE_MS)  // spätester Pulsbeginn nach Wellenstart
 #define WAVE_STATION_SPAN_MS 2000  // direkt von der Basis: -45 dBm → 0 ms … -95 dBm → 2000 ms
@@ -95,9 +99,10 @@
 // Identify-Pakete hängen 6 Byte Ziel-MAC an das SyncPacket an (17 + 6 = 23 Byte).
 // Ältere Firmware liest nur sizeof(SyncPacket) und kennt Modus 9 nicht → ignoriert.
 #define IDENTIFY_PACKET_LEN (sizeof(SyncPacket) + 6)
-// Wellen-Pakete von Badges (ab 1.4.0) hängen 2× uint16 an: ms seit Wellenstart an der Basis
-// und die eigene Puls-Verzögerung. Damit rechnet der Empfänger auf den gemeinsamen Start
-// zurück, statt beim Empfang neu zu beginnen. Ältere Firmware liest nur 17 Byte.
+// Wellen-Pakete von Badges (ab 1.4.0) hängen 2× uint16 an: Phase im Wellenzyklus
+// (ms seit Wellenstart modulo WAVE_DURATION_MS, also 0..3999) und die eigene Puls-Verzögerung.
+// Damit rechnet der Empfänger auf den gemeinsamen Start zurück, statt beim Empfang neu zu
+// beginnen. Ältere Firmware liest nur 17 Byte.
 #define WAVE_PACKET_LEN (sizeof(SyncPacket) + 4)
 
 struct __attribute__((packed)) SyncPacket {
@@ -162,6 +167,18 @@ static const uint32_t fxDurationMs[E_COUNT] = {
 // Wave-spezifisch: fx[E_WAVE].startTime = Wellenstart an der Basis (lokale Zeit),
 // waveDelay = eigener Pulsbeginn danach (kürzester bekannter Weg, siehe OnDataRecv)
 uint32_t waveDelay = 0;
+// Die Welle läuft endlos: loop() setzt startTime pro Zyklus um WAVE_DURATION_MS vor.
+// Gestoppte Wellen-ID: weitergeleitete Wellenpakete mit dieser ID werden ignoriert.
+// Eine Welle mit anderer ID startet normal (die alte ID bleibt gesperrt, damit verspätete
+// Pakete der alten Welle sie nicht wiederbeleben).
+uint32_t waveStopId = 0;
+// Stopp-Weiterleitung (begrenztes Flooding): OnDataRecv setzt nur den Zustand,
+// loop() sendet. Alles unter stateMux.
+static uint8_t  stopFwdLeft = 0;       // noch zu sendende Stopp-Pakete
+static uint32_t stopFwdNext = 0;       // Zeitpunkt der nächsten Sendung
+static uint32_t stopFwdId = 0;         // Ziel-Wellen-ID des weiterzuleitenden Stopps (unverändert aus dem Paket)
+static uint32_t stopLastSent = 0;      // Zeitpunkt der letzten Sendung (Beginn der Sperre)
+static bool     stopLockActive = false;
 
 // Ambient-spezifisch
 uint8_t ambientR = 0, ambientG = 0, ambientB = 0;
@@ -200,7 +217,8 @@ static void sendSync(uint8_t mode, uint32_t fxId) {
         ? ((uint32_t)ambientR << 16) | ((uint32_t)ambientG << 8) | ambientB
         : heartBeatState;
     if (mode == SYNC_MODE_WAVE) {
-        waveInfo[0] = (uint16_t)(millis() - fx[E_WAVE].startTime);
+        // Phase im Zyklus (< 4000): kein uint16-Überlauf bei endloser Welle
+        waveInfo[0] = (uint16_t)((millis() - fx[E_WAVE].startTime) % WAVE_DURATION_MS);
         waveInfo[1] = (uint16_t)waveDelay;
     }
     portEXIT_CRITICAL(&stateMux);
@@ -288,9 +306,11 @@ void OnDataRecv(const esp_now_recv_info_t *recv_info, const uint8_t *incomingDat
     const bool hasVer = (len >= (int)sizeof(SyncPacket));
 
     const float currentRSSI = (float)recv_info->rx_ctrl->rssi;
-    const uint32_t now = millis();
 
     portENTER_CRITICAL(&stateMux);
+    // now erst unter der Sperre lesen: so ist es nie früher als ein startTime/stopLastSent,
+    // das loop() gerade gesetzt hat (now - x würde sonst überlaufen).
+    const uint32_t now = millis();
     trackBadge(recv_info->src_addr, hasVer, rx.ver_major, rx.ver_minor, rx.ver_rel, rx.ver_dbg);
 
     smoothRSSI = (0.05f * currentRSSI) + (0.95f * smoothRSSI);
@@ -315,28 +335,52 @@ void OnDataRecv(const esp_now_recv_info_t *recv_info, const uint8_t *incomingDat
     if (rx.mode == SYNC_MODE_PRIME)   FX_START(E_PRIME,   rx.virusID);
     if (rx.mode == SYNC_MODE_WAVE) {
         // RSSI genau dieses Pakets (nicht smoothRSSI: der mittelt über alle Nachbarn).
-        // Badge-Pakete ab 1.4.0 tragen Laufzeit seit Wellenstart + Sender-Verzögerung;
-        // Station und ältere Badges nicht (Laufzeit 0, Sender-Verzögerung 0).
+        // Badge-Pakete ab 1.4.0 tragen die Zyklus-Phase + Sender-Verzögerung;
+        // Station und ältere Badges nicht (Phase 0, Sender-Verzögerung 0).
         uint32_t elapsed = 0, senderDelay = 0;
         if (!fromStation && len >= (int)WAVE_PACKET_LEN) {
             uint16_t wi[2];
             memcpy(wi, incomingData + sizeof(SyncPacket), sizeof(wi));
-            elapsed = wi[0];
+            elapsed = (uint32_t)wi[0] % WAVE_DURATION_MS;  // alte Badges senden ohnehin < 4000
             senderDelay = wi[1];
         }
         uint32_t d = waveDelayFor(currentRSSI, fromStation, senderDelay);
-        if (rx.virusID != fx[E_WAVE].id) {
-            if (elapsed < WAVE_DURATION_MS) {  // sonst ist die Welle schon vorbei
-                fx[E_WAVE].id = rx.virusID;
-                fx[E_WAVE].startTime = now - elapsed;
-                fx[E_WAVE].active = true;
-                waveDelay = d;
-            }
+        if (rx.virusID == waveStopId) {
+            // Gestoppte Welle (ggf. von Nachbarn weitergeleitet): ignorieren
+        } else if (rx.virusID != fx[E_WAVE].id) {
+            // Neue Welle bzw. später Einstieg in die laufende Welle: immer übernehmen
+            fx[E_WAVE].id = rx.virusID;
+            fx[E_WAVE].startTime = now - elapsed;
+            fx[E_WAVE].active = true;
+            waveDelay = d;
         } else if (fx[E_WAVE].active && d < waveDelay) {
             // Kürzerer Weg (z. B. Basis direkt nach einer Weiterleitung): übernehmen,
-            // solange der eigene Puls noch nicht läuft.
-            uint32_t sinceStart = now - fx[E_WAVE].startTime;
+            // solange der eigene Puls im aktuellen Zyklus noch nicht läuft.
+            uint32_t sinceStart = (now - fx[E_WAVE].startTime) % WAVE_DURATION_MS;
             if (sinceStart < waveDelay) waveDelay = d > sinceStart ? d : sinceStart;
+        }
+    }
+    if (rx.mode == SYNC_MODE_WAVE_STOP) {
+        // Welle beenden und ihre ID sperren. Weiterleitung nur, wenn gerade keine läuft
+        // und die Sperre nach der letzten Weiterleitung abgelaufen ist; gesendet wird in loop().
+        // Zu sperrende ID: laufende lokale Welle (echte ID, auch bei alter Basis mit Zufalls-ID),
+        // sonst die Ziel-ID aus dem Paket (Welle trifft evtl. erst noch ein; 0 = unbekannt).
+        // Ziel-ID: 0 = Wildcard → konkret die laufende lokale Welle nehmen.
+        uint32_t zielId = rx.virusID;
+        if (zielId == 0 && fx[E_WAVE].active && fx[E_WAVE].id != 0) zielId = fx[E_WAVE].id;
+        if (zielId == 0) {
+            // Ziel wirklich unbekannt (keine aktive Welle): nur lokal beenden, keine ID sperren
+            fx[E_WAVE].active = false;
+        } else {
+            // Nur die passende Welle beenden; fremde laufende Welle bleibt
+            if (fx[E_WAVE].active && fx[E_WAVE].id == zielId) fx[E_WAVE].active = false;
+            waveStopId = zielId;  // Sperre immer setzen
+        }
+        const bool locked = stopLockActive && (now - stopLastSent < WAVE_STOP_LOCK_MS);
+        if (stopFwdLeft == 0 && !locked) {
+            stopFwdId = zielId;  // konkrete Ziel-ID weiterreichen
+            stopFwdLeft = WAVE_STOP_FWD_COUNT;
+            stopFwdNext = now;
         }
     }
     if (rx.mode == SYNC_MODE_BEAT)    FX_START(E_BEAT,    rx.virusID);
@@ -487,13 +531,42 @@ void loop() {
 
     // Abgelaufene Effekte deaktivieren, Snapshot für das Rendern
     for (int i = 0; i < E_COUNT; i++) {
-        if (fx[i].active && now - fx[i].startTime >= fxDurationMs[i]) fx[i].active = false;
+        if (i == E_WAVE) {
+            // Welle läuft endlos: nie ablaufen, sondern startTime um ganze Zyklen vorsetzen
+            // (verpasste Zyklen werden in einem Schritt aufgeholt; kein Wraparound-Problem,
+            // da startTime <= now gilt und die Differenz unsigned gerechnet wird).
+            if (fx[i].active) {
+                uint32_t age = now - fx[i].startTime;
+                if (age >= WAVE_DURATION_MS) fx[i].startTime += (age / WAVE_DURATION_MS) * WAVE_DURATION_MS;
+            }
+        } else if (fx[i].active && now - fx[i].startTime >= fxDurationMs[i]) {
+            fx[i].active = false;
+        }
         fs[i] = fx[i];
     }
     waveDelayS = waveDelay;
     ambR = ambientR; ambG = ambientG; ambB = ambientB;
 
+    // Stopp-Weiterleitung: höchstens eine Sendung pro Frame, Gesamtzahl/Abstand/Sperre
+    // über Zustand unter stateMux; gesendet wird nach dem Freigeben der Sperre.
+    bool sendStopNow = false;
+    uint32_t stopIdS = 0;
+    if (stopFwdLeft > 0 && (int32_t)(now - stopFwdNext) >= 0) {
+        sendStopNow = true;
+        stopIdS = stopFwdId;
+        stopFwdLeft--;
+        stopFwdNext = now + WAVE_STOP_FWD_GAP_MS;
+        if (stopFwdLeft == 0) {  // letzte Sendung: ab jetzt 1000 ms Sperre
+            stopLastSent = now;
+            stopLockActive = true;
+        }
+    }
+
     portEXIT_CRITICAL(&stateMux);
+
+    // sendSync nimmt stateMux selbst (nicht verschachteln) — daher erst hier. Es setzt
+    // txData.mode, der reguläre Sync-Block unten sendet dadurch im selben Frame direkt danach.
+    if (sendStopNow) sendSync(SYNC_MODE_WAVE_STOP, stopIdS);
 
     uint8_t currentBright = BRIGHT_MIN + (uint8_t)(power * (BRIGHT_MAX - BRIGHT_MIN));
 
@@ -537,8 +610,9 @@ void loop() {
         activeMode = SYNC_MODE_PRIME;
         activeFxId = fs[E_PRIME].id;
     }
-    else if (fs[E_WAVE].active && (now - fs[E_WAVE].startTime < WAVE_DURATION_MS)) {
-        uint32_t elapsed = now - fs[E_WAVE].startTime;
+    else if (fs[E_WAVE].active) {
+        // Phase im Zyklus (loop() hat startTime bereits vorgesetzt; Modulo als Absicherung)
+        uint32_t elapsed = (now - fs[E_WAVE].startTime) % WAVE_DURATION_MS;
         if (elapsed >= waveDelayS && elapsed < waveDelayS + WAVE_PULSE_MS) {
             uint32_t pulseElapsed = elapsed - waveDelayS;
             uint8_t brightness;

@@ -19,6 +19,8 @@ defmodule HerzSchwarmWeb.DashboardLive do
       socket
       |> assign(
         bridge_connected: bridge_connected,
+        bridge_fw: bridge_fw(peers.last_pong),
+        bridge_ota: bridge_ota(peers.last_pong),
         peer_count: peers.peer_count,
         peers: peers.peers,
         find_msg: nil,
@@ -26,6 +28,7 @@ defmodule HerzSchwarmWeb.DashboardLive do
         mode_name: effect.mode_name,
         bpm: effect.bpm,
         beat_active: effect.beat_active,
+        wave_active: effect.wave_running,
         color: effect.color,
         color_hex: color_to_hex(effect.color),
         log: []
@@ -46,6 +49,9 @@ defmodule HerzSchwarmWeb.DashboardLive do
           <span class={"badge #{if @bridge_connected, do: "badge-ok", else: "badge-err"}"}>
             Bridge: {if @bridge_connected, do: "verbunden", else: "getrennt"}
           </span>
+          <.link navigate={~p"/bridge-update"} id="bridge-fw-link" class="badge badge-info">
+            Bridge-FW {@bridge_fw || "?"}{bridge_ota_suffix(@bridge_ota)} &middot; Update
+          </.link>
           <span class="badge badge-info">
             &#x1F4F1; Peers: {@peer_count}
           </span>
@@ -61,11 +67,11 @@ defmodule HerzSchwarmWeb.DashboardLive do
           <div class="btn-grid">
             <button
               :for={{mode, name} <- effect_buttons()}
-              class={"btn btn-effect #{btn_class(mode)}"}
-              phx-click="effect"
+              class={"btn btn-effect #{btn_class(mode, @wave_active)}"}
+              phx-click={effect_event(mode, @wave_active)}
               phx-value-mode={mode}
             >
-              {name}
+              {effect_label(mode, name, @wave_active)}
             </button>
           </div>
         </div>
@@ -123,7 +129,19 @@ defmodule HerzSchwarmWeb.DashboardLive do
             <button class="btn btn-stop w-full" phx-click="stop-all">
               &#x23F9; Alle Effekte stoppen
             </button>
-            <button class="btn btn-wave w-full" phx-click="effect" phx-value-mode="4">
+            <button
+              :if={@wave_active}
+              class="btn btn-stop w-full"
+              phx-click="wave_stop"
+            >
+              &#x23F9; Welle stoppen
+            </button>
+            <button
+              :if={!@wave_active}
+              class="btn btn-wave w-full"
+              phx-click="effect"
+              phx-value-mode="4"
+            >
               &#x1F30A; Welle senden
             </button>
             <button class="btn btn-virus w-full" phx-click="effect" phx-value-mode="1">
@@ -198,7 +216,12 @@ defmodule HerzSchwarmWeb.DashboardLive do
         EffectEngine.trigger_effect(mode)
     end
 
-    {:noreply, socket}
+    {:noreply, assign(socket, wave_active: mode == 4)}
+  end
+
+  def handle_event("wave_stop", _, socket) do
+    EffectEngine.stop_wave()
+    {:noreply, assign(socket, wave_active: false)}
   end
 
   def handle_event("set-bpm", %{"bpm" => bpm_str}, socket) do
@@ -252,7 +275,8 @@ defmodule HerzSchwarmWeb.DashboardLive do
        active_mode: state.active_mode,
        mode_name: state.mode_name,
        bpm: state.bpm,
-       beat_active: state.beat_active
+       beat_active: state.beat_active,
+       wave_active: state.wave_running
      )}
   end
 
@@ -261,7 +285,10 @@ defmodule HerzSchwarmWeb.DashboardLive do
      assign(socket,
        peer_count: status.peer_count,
        peers: status.peers,
-       bridge_connected: status.bridge_connected
+       bridge_connected: status.bridge_connected,
+       # Bei getrennter Bridge ist last_pong nil -> FW/OTA-Anzeige wird geleert
+       bridge_fw: bridge_fw(status.last_pong),
+       bridge_ota: bridge_ota(status.last_pong)
      )}
   end
 
@@ -278,6 +305,17 @@ defmodule HerzSchwarmWeb.DashboardLive do
   end
 
   # --- Helpers ---
+
+  # Bridge-FW >= 0.3.0 meldet "fw" und "ota" im pong; aeltere nichts (-> nil).
+  defp bridge_fw(%{"fw" => fw}) when is_binary(fw), do: fw
+  defp bridge_fw(_), do: nil
+
+  defp bridge_ota(%{"ota" => ota}) when is_binary(ota), do: ota
+  defp bridge_ota(_), do: nil
+
+  defp bridge_ota_suffix(nil), do: ""
+  defp bridge_ota_suffix("idle"), do: ""
+  defp bridge_ota_suffix(ota), do: " (OTA: #{ota})"
 
   defp effect_buttons do
     [
@@ -299,6 +337,16 @@ defmodule HerzSchwarmWeb.DashboardLive do
       :error -> false
     end
   end
+
+  # Welle (4) ist ein Toggle: läuft sie, wird der Button zum Stopp.
+  defp effect_event(4, true), do: "wave_stop"
+  defp effect_event(_mode, _wave_active), do: "effect"
+
+  defp effect_label(4, _name, true), do: "⏹ Welle stoppen"
+  defp effect_label(_mode, name, _wave_active), do: name
+
+  defp btn_class(4, true), do: "btn-stop"
+  defp btn_class(mode, _wave_active), do: btn_class(mode)
 
   defp btn_class(1), do: "btn-virus"
   defp btn_class(2), do: "btn-rainbow"

@@ -14,6 +14,7 @@ defmodule HerzSchwarmWeb.Router do
     pipe_through :browser
 
     live "/", DashboardLive, :index
+    live "/bridge-update", BridgeUpdateLive, :index
   end
 
   if Application.compile_env(:herz_schwarm, :dev_routes, false) do

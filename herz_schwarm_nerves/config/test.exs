@@ -6,3 +6,4 @@ config :herz_schwarm, HerzSchwarmWeb.Endpoint,
   server: false
 
 config :logger, level: :warning
+config :herz_schwarm, bridge_enabled: false

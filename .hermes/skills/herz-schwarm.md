@@ -105,7 +105,7 @@ build_batch_gui/                    # TUI-Build-Cache (gitignored)
 ## Effekt-Steuerung: NICHT im TUI
 
 - TUI-Flasher: nur Compile / Upload / MAC-Read / Log
-- Effekte (Modes 1-8: Virus, Regenbogen, Primzahl, Welle, Beat, Zone, Ambient, Strobe):
+- Effekte (Modes 1-8 + 10 Wellen-Stopp: Virus, Regenbogen, Primzahl, Welle, Beat, Zone, Ambient, Strobe):
   - **Web-UI** der Basisstation: `http://<basestation-ip>/` (Port 80)
   - **MQTT**: konfiguriert in NVS der Basisstation, Subscribe auf `herzschwarm/base/cmd/virus`
 - TUI hat **keinen ESP-NOW-Adapter** — bewusst keine Effekt-Steuerung
@@ -137,7 +137,7 @@ ESP32 als USB-Serial-JSON-Bridge.
 - **Bridge-Firmware**: `herz_schwarm_nerves/firmware/esp32_bridge/esp32_bridge.ino` (115200 Baud, JSON-newline)
 - **GenServer-Architektur**: `Bridge` (UART) → `EffectEngine` (State) → `PeerTracker` (Status) → `DashboardLive` (UI)
 - **PubSub-Topics**: `bridge:events`, `effect:state`, `peers:count`
-- **Effekt-Steuerung** (Modes 1-8) identisch zur ESP32-S3-Basisstation — beide nutzen Kanal 13, MAGIC_ID 0x421337CC
+- **Effekt-Steuerung** (Modes 1-8 + Wellen-Stopp 10) identisch zur ESP32-S3-Basisstation — beide nutzen Kanal 13, MAGIC_ID 0x421337CC
 - **Auto-Detect UART** auf Mac: `Path.wildcard` auf cu.usbserial-*, cu.SLAB_USBtoUART, cu.usbmodem* (XIAO C6)
 - **Reconnect-Backoff** exponential (2s→4s→…→30s) — verhindert Log-Spam bei fehlender Hardware
 - **Nerves-Production-Build** (Raspberry Pi 4) ist optional — der Mac als Dev-Host reicht

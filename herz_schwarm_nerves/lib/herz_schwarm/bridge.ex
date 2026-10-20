@@ -33,8 +33,17 @@ defmodule HerzSchwarm.Bridge do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
   end
 
+  @doc """
+  Sendet ein Kommando an die Bridge (die `seq` wird hier vergeben).
+
+  Gibt `{:ok, seq}` zurueck, damit Aufrufer das passende `ack`/`err` aus
+  `"bridge:events"` zuordnen koennen, oder `{:error, reason}`. Bestehende
+  Aufrufer duerfen den Rueckgabewert ignorieren.
+  """
   def send_command(cmd) when is_map(cmd) do
-    GenServer.cast(__MODULE__, {:send_command, cmd})
+    GenServer.call(__MODULE__, {:send_command, cmd})
+  catch
+    :exit, _ -> {:error, :bridge_down}
   end
 
   def connected? do
@@ -70,17 +79,19 @@ defmodule HerzSchwarm.Bridge do
     {:reply, state.connected, state}
   end
 
-  @impl true
-  def handle_cast({:send_command, cmd}, state) do
+  def handle_call({:send_command, cmd}, _from, state) do
     if state.connected do
       seq = state.seq + 1
       cmd = Map.put(cmd, :seq, seq)
       json = Jason.encode!(cmd) <> "\n"
-      UART.write(state.uart_pid, json)
-      {:noreply, %{state | seq: seq}}
+
+      case UART.write(state.uart_pid, json) do
+        :ok -> {:reply, {:ok, seq}, %{state | seq: seq}}
+        {:error, reason} -> {:reply, {:error, reason}, %{state | seq: seq}}
+      end
     else
       Logger.warning("Bridge not connected, dropping command: #{inspect(cmd)}")
-      {:noreply, state}
+      {:reply, {:error, :not_connected}, state}
     end
   end
 

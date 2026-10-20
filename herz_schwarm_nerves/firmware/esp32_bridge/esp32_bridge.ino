@@ -11,14 +11,27 @@
  *   {"cmd":"status","seq":44}
  *   {"cmd":"peers","seq":45}
  *   {"cmd":"identify","mac":"A0:F2:62:EC:3B:B4","seq":46}
+ *   {"cmd":"ota_begin","seq":47,"size":1048576,"ver":"0.3.0"}   (UART-OTA, siehe unten)
+ *   {"cmd":"ota_chunk","seq":48,"off":0,"data":"<base64, 96 Rohbytes>"}
+ *   {"cmd":"ota_end","seq":49}
+ *   {"cmd":"ota_abort","seq":50}
  *
  * Protokoll (Bridge → Pi):
  *   {"evt":"ack","seq":42}
- *   {"evt":"pong","peers":5,"uptime":12345}
+ *   {"evt":"pong","peers":5,"uptime":12345,"free_heap":200000,"fw":"0.3.0","ota":"idle"}
  *   {"evt":"peer","mac":"A0:F2:62:EC:3B:B4","rssi":-74,"fw":"1.3.0","age":40}   (je Station)
  *   {"evt":"peers","seq":45,"n":5}                                             (Ende der Liste)
  *   {"evt":"log","msg":"bridge ready"}
  *   {"evt":"err","msg":"json parse failed"}
+ *   {"evt":"err","seq":47,"msg":"busy: ota"}                                  (Fehler mit seq, wo bekannt)
+ *
+ * UART-OTA (Firmware-Update der Bridge über die bestehende Serial-Verbindung):
+ *   ota_begin → Update.begin(size); ota_chunk* (strikt sequenziell, "off" = bisher
+ *   geschriebene Rohbytes, ein Chunk darf wiederholt werden); ota_end → Update.end,
+ *   Ack, dann Neustart; ota_abort → verwirft. Während des Updates antwortet
+ *   "effect" mit err "busy: ota"; status/peers laufen weiter. Eine Zeile darf max.
+ *   MAX_JSON_LEN (256) Byte lang sein → Chunks sind OTA_CHUNK_BYTES (96) Rohbytes.
+ *   Braucht ein Partition-Schema mit zwei App-Slots (sketch.yaml: min_spiffs).
  *
  * Protokoll (Station → Bridge, ESP-NOW binär, kein JSON):
  *   Badges broadcasten laufend SyncPackets; während eines Effekts mit
@@ -39,15 +52,22 @@
 #include <esp_now.h>
 #include <esp_wifi.h>
 #include <ArduinoJson.h>
+#include <Update.h>
+#include "mbedtls/base64.h"
 
 #define CCC_CHANNEL     13
 #define MAGIC_ID        0x421337CC
 #define BRIDGE_FW_MAJOR 0
-#define BRIDGE_FW_MINOR 2
+#define BRIDGE_FW_MINOR 3
 #define BRIDGE_FW_PATCH 0
 
 #define MAX_JSON_LEN    256
 #define SERIAL_BAUD     115200
+
+#define OTA_CHUNK_BYTES    96      // Rohbytes pro ota_chunk (Base64 = 128 Zeichen, Zeile ~190 Byte < 256)
+#define OTA_B64_MAX        136     // max. Base64-Zeichen, die wir akzeptieren (96 Byte → 128, etwas Luft)
+#define OTA_IDLE_TIMEOUT_MS 30000  // kein Chunk/Kommando mehr → Update verwerfen, damit "busy" nie hängen bleibt
+#define OTA_MAX_BAD_CHUNKS  5      // so viele fehlerhafte Chunks in Folge → Update abbrechen
 
 #define MAX_STATIONS      32     // Obergrenze gleichzeitig bekannter Stationen; veraltete Slots werden wiederverwendet
 #define ACK_TIMEOUT_MS    150    // Wartezeit auf Acks bevor ggf. erneut gebroadcastet wird
@@ -55,6 +75,7 @@
 #define STATION_STALE_MS  5000   // Station gilt nach dieser Inaktivität als offline (Badges senden mit 20 Hz)
 #define SYNC_PACKET_LEGACY_LEN 13
 #define SYNC_MODE_IDENTIFY 9     // "Badge finden": SyncPacket + 6 Byte Ziel-MAC (Badge-FW >= 1.3)
+#define SYNC_MODE_WAVE_STOP 10   // Welle manuell beenden (Badge-FW, die Modus 4 endlos laufen lässt)
 #define IDENTIFY_REPEATS   3     // Funk ist verlustbehaftet; Badge dedupliziert per virusID
 
 struct __attribute__((packed)) SyncPacket {
@@ -97,6 +118,20 @@ static uint8_t broadcastMac[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 static char lineBuf[MAX_JSON_LEN];
 static int linePos = 0;
 
+// UART-OTA-Zustand
+enum OtaState : uint8_t { OTA_IDLE, OTA_WRITING, OTA_ERROR };
+static OtaState otaState = OTA_IDLE;
+static bool     otaActive = false;       // true solange ein Update läuft (nur loop-Task)
+static uint32_t otaSize = 0;             // angekündigte Gesamtgröße
+static uint32_t otaWritten = 0;          // bisher geschriebene Rohbytes
+static uint32_t otaLastOff = 0;          // letzter Chunk, für idempotente Wiederholung (Ack ging verloren)
+static uint32_t otaLastLen = 0;
+static uint8_t  otaLastData[OTA_CHUNK_BYTES]; // Rohinhalt des letzten Chunks, zum Vergleich bei Wiederholung
+static bool     otaLastValid = false;         // true, wenn otaLastData/otaLastLen gültig sind
+static uint32_t otaLastActivityMs = 0;   // nur durch gültige Chunks/Wiederholungen aktualisiert
+static uint8_t  otaBadChunks = 0;        // fehlerhafte Chunks in Folge
+static uint8_t  otaBuf[OTA_CHUNK_BYTES + 8];  // statischer Dekodierpuffer
+
 static void sendJson(const JsonDocument &doc) {
     char out[256];
     serializeJson(doc, out, sizeof(out));
@@ -113,6 +148,14 @@ static void sendAck(uint32_t seq) {
 static void sendError(const char *msg) {
     JsonDocument doc;
     doc["evt"] = "err";
+    doc["msg"] = msg;
+    sendJson(doc);
+}
+
+static void sendErrorSeq(uint32_t seq, const char *msg) {
+    JsonDocument doc;
+    doc["evt"] = "err";
+    doc["seq"] = seq;
     doc["msg"] = msg;
     sendJson(doc);
 }
@@ -227,6 +270,10 @@ static void sendPong() {
     doc["peers"] = alive;
     doc["uptime"] = (uint32_t)(millis() / 1000);
     doc["free_heap"] = ESP.getFreeHeap();
+    char fw[12];
+    snprintf(fw, sizeof(fw), "%d.%d.%d", BRIDGE_FW_MAJOR, BRIDGE_FW_MINOR, BRIDGE_FW_PATCH);
+    doc["fw"] = fw;
+    doc["ota"] = otaState == OTA_WRITING ? "writing" : (otaState == OTA_ERROR ? "error" : "idle");
     sendJson(doc);
 }
 
@@ -296,6 +343,143 @@ static bool sendIdentify(const uint8_t *mac) {
     return ok;
 }
 
+// --- UART-OTA ---
+
+// Update abbrechen und aufräumen. failed=true → Zustand "error" (in pong sichtbar).
+static void otaReset(bool failed) {
+    if (otaActive) {
+        Update.abort();
+    }
+    otaActive = false;
+    otaSize = 0;
+    otaWritten = 0;
+    otaLastOff = 0;
+    otaLastLen = 0;
+    otaLastValid = false;
+    otaBadChunks = 0;
+    otaState = failed ? OTA_ERROR : OTA_IDLE;
+}
+
+static void handleOtaBegin(JsonDocument &doc, uint32_t seq) {
+    if (otaActive) {
+        sendErrorSeq(seq, "busy: ota");
+        return;
+    }
+    uint32_t size = doc["size"] | (uint32_t)0;
+    if (size == 0) {
+        sendErrorSeq(seq, "size required");
+        return;
+    }
+    // Eine laufende Effekt-Zustellung ist hier unwichtig; Update.begin löscht den
+    // Ziel-Slot (kann 1-3 s dauern, die App wartet dafür länger auf dieses Ack).
+    if (!Update.begin(size, U_FLASH)) {
+        otaState = OTA_ERROR;
+        sendErrorSeq(seq, Update.errorString());
+        Update.abort();
+        return;
+    }
+    otaActive = true;
+    otaState = OTA_WRITING;
+    otaSize = size;
+    otaWritten = 0;
+    otaLastOff = 0;
+    otaLastLen = 0;
+    otaLastValid = false;
+    otaBadChunks = 0;
+    otaLastActivityMs = millis();
+    sendAck(seq);
+}
+
+// Fehlerhaften Chunk melden. Der Idle-Timer wird dabei bewusst NICHT verlängert,
+// damit ein Update mit nur kaputten Chunks per Idle-Timeout endet.
+static void otaRejectChunk(uint32_t seq, const char *msg) {
+    sendErrorSeq(seq, msg);
+    if (++otaBadChunks >= OTA_MAX_BAD_CHUNKS) {
+        otaReset(true);
+        sendLog("ota: zu viele fehlerhafte Chunks, abgebrochen");
+    }
+}
+
+static void handleOtaChunk(JsonDocument &doc, uint32_t seq) {
+    if (!otaActive) {
+        sendErrorSeq(seq, "no ota in progress");
+        return;
+    }
+    uint32_t off = doc["off"] | (uint32_t)0;
+    const char *b64 = doc["data"] | "";
+    size_t b64Len = strlen(b64);
+    if (b64Len == 0 || b64Len > OTA_B64_MAX) {
+        otaRejectChunk(seq, "bad chunk size");
+        return;
+    }
+    size_t len = 0;
+    if (mbedtls_base64_decode(otaBuf, sizeof(otaBuf), &len, (const unsigned char *)b64, b64Len) != 0 || len == 0) {
+        otaRejectChunk(seq, "bad base64");
+        return;
+    }
+    // Wiederholung des zuletzt geschriebenen Chunks (Ack ging unterwegs verloren): nur erneut bestätigen,
+    // aber nur wenn der Inhalt identisch ist. Abweichender Inhalt ist ein Fehler und verlängert nichts.
+    if (otaWritten > 0 && otaLastValid && off == otaLastOff && len == otaLastLen) {
+        if (memcmp(otaBuf, otaLastData, len) != 0) {
+            otaRejectChunk(seq, "chunk content mismatch");
+            return;
+        }
+        otaLastActivityMs = millis();
+        otaBadChunks = 0;
+        sendAck(seq);
+        return;
+    }
+    if (off != otaWritten) {
+        otaRejectChunk(seq, "offset mismatch");
+        return;
+    }
+    if (otaWritten + len > otaSize) {
+        otaRejectChunk(seq, "chunk exceeds size");
+        return;
+    }
+    size_t w = Update.write(otaBuf, len);
+    if (w != len) {
+        // errorString vor abort() lesen: abort() setzt den Fehler zurück
+        sendErrorSeq(seq, Update.errorString());
+        otaReset(true);
+        return;
+    }
+    otaLastOff = otaWritten;
+    otaLastLen = (uint32_t)len;
+    // Rohinhalt merken (nur wenn er in den Vergleichspuffer passt; sonst keine Wiederholungserkennung für diesen Chunk)
+    otaLastValid = len <= OTA_CHUNK_BYTES;
+    if (otaLastValid) {
+        memcpy(otaLastData, otaBuf, len);
+    }
+    otaWritten += (uint32_t)len;
+    otaLastActivityMs = millis();
+    otaBadChunks = 0;
+    sendAck(seq);
+}
+
+static void handleOtaEnd(uint32_t seq) {
+    if (!otaActive) {
+        sendErrorSeq(seq, "no ota in progress");
+        return;
+    }
+    if (otaWritten != otaSize) {
+        // Update bleibt offen: die App kann abbrechen oder (nach Fehler) neu starten.
+        sendErrorSeq(seq, "incomplete");
+        return;
+    }
+    if (!Update.end(true)) {
+        sendErrorSeq(seq, Update.errorString());
+        otaReset(true);
+        return;
+    }
+    otaActive = false;
+    otaState = OTA_IDLE;
+    sendAck(seq);
+    Serial.flush();
+    delay(500);
+    ESP.restart();
+}
+
 static void handleCommand(const char *json) {
     JsonDocument doc;
     DeserializationError err = deserializeJson(doc, json);
@@ -308,12 +492,19 @@ static void handleCommand(const char *json) {
     uint32_t seq = doc["seq"] | 0;
 
     if (strcmp(cmd, "effect") == 0) {
+        if (otaActive) {
+            sendErrorSeq(seq, "busy: ota");
+            return;
+        }
         uint8_t mode = doc["mode"] | 0;
-        uint32_t virusID = doc["virusID"] | (uint32_t)esp_random();
+        // Stopp: ID der laufenden Welle aus dem JSON, sonst 0 (Wildcard), nie Zufalls-ID
+        uint32_t virusID = (mode == SYNC_MODE_WAVE_STOP)
+                               ? (doc["virusID"] | (uint32_t)0)
+                               : (doc["virusID"] | (uint32_t)esp_random());
         uint32_t beatCounter = doc["beatCounter"] | (uint32_t)millis();
 
-        if (mode < 1 || mode > 8) {
-            sendError("mode must be 1-8");
+        if ((mode < 1 || mode > 8) && mode != SYNC_MODE_WAVE_STOP) {
+            sendError("mode must be 1-8 or 10");
             return;
         }
 
@@ -364,6 +555,19 @@ static void handleCommand(const char *json) {
             e["msg"] = "esp_now_send failed";
             sendJson(e);
         }
+    }
+    else if (strcmp(cmd, "ota_begin") == 0) {
+        handleOtaBegin(doc, seq);
+    }
+    else if (strcmp(cmd, "ota_chunk") == 0) {
+        handleOtaChunk(doc, seq);
+    }
+    else if (strcmp(cmd, "ota_end") == 0) {
+        handleOtaEnd(seq);
+    }
+    else if (strcmp(cmd, "ota_abort") == 0) {
+        otaReset(false);
+        sendAck(seq);
     }
     else {
         sendError("unknown cmd");
@@ -416,6 +620,12 @@ void loop() {
             linePos = 0;
             sendError("cmd too long");
         }
+    }
+
+    // Verwaistes Update (App weg, Kabel gezogen) nach Timeout verwerfen
+    if (otaActive && millis() - otaLastActivityMs > OTA_IDLE_TIMEOUT_MS) {
+        otaReset(true);
+        sendLog("ota timeout, aborted");
     }
 
     if (pendingActive) {
