@@ -8,6 +8,9 @@ build_batch_gui/
 # Backup-Dateien
 *.bak
 
+# Python-Bytecode (scripts/flashlib)
+__pycache__/
+
 # Nerves / Elixir (herz_schwarm_nerves/)
 herz_schwarm_nerves/_build/
 herz_schwarm_nerves/deps/

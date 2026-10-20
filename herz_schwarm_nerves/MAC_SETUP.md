@@ -228,7 +228,7 @@ UART_DEVICE=/dev/cu.usbmodem101 mix phx.server
 # 4. Browser: http://localhost:4000
 ```
 
-## Bridge-Firmware flashen (C6 / ESP32 / ESP32-S3)
+## Bridge-Firmware flashen (C3 / C6 / ESP32 / ESP32-S3)
 
 ### Voraussetzungen prüfen
 
@@ -279,6 +279,47 @@ pip3 install --user pyserial
 - **USB-CDC-Reset beim Serial-Open**: XIAO C6 hat das **nicht** (im Gegensatz zu ESP32-C3)
 - **Channel 13** für ESP-NOW: Kanal ist in `esp32_bridge.ino` fest verdrahtet, MAC `0x421337CC`
 
+### ESP32-C3 flashen (die Bridge am Raspberry Pi)
+
+Die am Pi hängende Bridge ist ein **ESP32-C3** mit nativem USB-CDC. FQBN (der Mac-Weg):
+
+```bash
+# min_spiffs = zwei App-Slots, nötig für OTA
+arduino-cli compile --fqbn esp32:esp32:esp32c3:CDCOnBoot=cdc,PartitionScheme=min_spiffs \
+  --export-binaries herz_schwarm_nerves/firmware/esp32_bridge/
+```
+
+**Vom Pi aus flashen (über USB-CDC, ohne Mac):**
+
+```bash
+# 1. esptool installieren
+sudo apt-get install -y python3-pip
+sudo pip3 install --break-system-packages esptool
+
+# 2. App stoppen — sonst hält sie den Port
+sudo systemctl stop herz-schwarm
+
+# 3. Backup des aktuellen Flashs (4 MB, dauert ~25 s)
+esptool --chip esp32c3 --port /dev/ttyACM0 read-flash 0x0 0x400000 ~/bridge_backup_<version>_4MB.bin
+
+# 4. Neue Firmware schreiben (Dateien aus dem Build-Verzeichnis)
+esptool --chip esp32c3 --port /dev/ttyACM0 write-flash \
+  --flash-mode dio --flash-freq 80m --flash-size 4MB \
+  0x0     esp32_bridge.ino.bootloader.bin \
+  0x8000  esp32_bridge.ino.partitions.bin \
+  0xe000  boot_app0.bin \
+  0x10000 esp32_bridge.ino.bin
+
+# 5. App wieder starten
+sudo systemctl start herz-schwarm
+```
+
+Die tatsächlichen Dateinamen im Build-Verzeichnis heißen `esp32_bridge.ino.bootloader.bin` und
+`esp32_bridge.ino.partitions.bin` (nicht `bootloader.bin` / `partitions.bin`).
+
+**Hinweis:** Wurde die bereits laufende Bridge mit einem Schema **ohne** zweiten App-Slot geflasht, schlägt
+OTA fehl (`Update.begin`, siehe „Bridge-Update über das Dashboard") — für Updates bleibt dann nur USB.
+
 ## App starten auf Mac
 
 ### Erste Schritte
@@ -322,6 +363,12 @@ UART_DEVICE=/dev/cu.usbmodem14101 mix phx.server
 - Live-Updates via PubSub (kein Polling, WebSocket)
 - Bridge-Status + Peer-Count in Header
 - Ab App 0.2.0: Header zeigt die Bridge-Firmware-Version (aus `pong`, bei Bridge < 0.3.0 `?`) und verlinkt die Seite **`/bridge-update`** (siehe „Bridge-Update über das Dashboard“)
+- Ab App 0.2.0 / Bridge 0.4.0: Karte **Tap-Counter** — Gesamtsumme und Wert je Badge, mit Reset
+- Knopf **„Alle Effekte auf den Badges stoppen“** (sendet Modus 12)
+- Effekte laufen **endlos**, bis gestoppt wird. Beat ist ein 150-ms-Puls, „Badge finden“ (Identify) blinkt 10 s grün
+- **Stolperstein:** BPM-Slider und Ambient-Farbwähler müssen **innerhalb** eines Formulars gebunden sein
+  (`form`/`field` mit `phx-change`) — LiveView feuert `phx-change` auf Einzel-Inputs nicht, ohne Formular
+  ändern die Regler nichts an den Effekten
 
 ## UART-Device auf Mac
 
@@ -384,6 +431,14 @@ Badge blinkt 10 s grün (Badge-FW ≥ 1.3.0), Antwort `ack`. Der Pi pollt `peers
 das Dashboard zeigt die Liste mit „🔎 Finden“-Button (`HerzSchwarm.PeerTracker.identify/1`).
 
 **Peer-Count:** `{"evt":"pong","peers":N,...}` liefert jetzt die echte Anzahl zuletzt aktiver Stationen (vorher immer `0`, das Feld wurde nie gesetzt). Der Pi pollt `{"cmd":"status"}` alle 5s automatisch (`HerzSchwarm.Bridge`), das Dashboard zeigt den Wert live über `PeerTracker`.
+
+**Tap-Events (ab Bridge 0.4.0):** Badges zählen Taps und melden ihren Zählerstand im SyncPacket. Die Bridge
+sendet zusätzlich eine Zeile
+`{"evt":"tap","mac":"AA:BB:CC:DD:EE:FF","count":N}` — **nur wenn der Zählerstand über dem zu dieser MAC
+bekannten Maximum liegt** (Dedup: dasselbe SyncPacket, sowie jeder gleiche oder kleinere Wert, erzeugt kein
+Event). Startet ein Badge neu, beginnt sein Zähler bei 0; Werte unter dem bisherigen Maximum ignoriert die App,
+bis der Badge wieder darüber liegt. Das Dashboard summiert die Werte (Karte „Tap-Counter", siehe
+*Phoenix-Web-UI*).
 
 **Für Stations-Firmware ohne eigenen SyncPacket-Broadcast** (separates Repo, nicht hier): nach Empfang eines validen `SyncPacket` ein `AckPacket{magic_id: 0x421337CC, virusID: <empfangene virusID>}` per `esp_now_send()` unicast an die Absender-MAC zurücksenden. Die Bridge-MAC muss dafür einmalig als ESP-NOW-Peer registriert werden (unverschlüsselt, Kanal 13).
 
@@ -464,6 +519,109 @@ mix burn
 
 Aber: **dieser Workflow ist hier selten nötig** — der Mac als Host reicht für Dev + Test, die ESP32-S3+W5500-Variante ist im Produktiv-Einsatz bewährt.
 
+## Betrieb auf dem Raspberry Pi (ohne Nerves)
+
+Die App läuft auch als **normale Phoenix-App auf Raspberry Pi OS** (Debian 13, aarch64, getestet auf Pi 4) —
+**kein Nerves-Firmware-Flash, keine SD-Karten-Neuinstallation**. Nerves ist hier nur eine target-only-Dep und
+wird übersprungen; gebaut wird direkt auf dem Pi.
+
+### 1. Werkzeugkette installieren
+
+```bash
+sudo apt-get install -y elixir erlang-dev build-essential git rsync ca-certificates curl inotify-tools
+# liefert Elixir 1.18 / OTP 27 — das Projekt verlangt nur ~> 1.15, passt also
+```
+
+### 2. Mix-Archiv `nerves_bootstrap` (Pflicht)
+
+```bash
+mix local.hex --force
+mix local.rebar --force
+mix archive.install hex nerves_bootstrap "~> 1.13" --force
+```
+
+**Ohne dieses Archiv schlägt jedes `mix`-Kommando fehl**, weil `mix.exs`
+`archives: [nerves_bootstrap: …]` deklariert. `MIX_TARGET` bleibt ungesetzt (kein Nerves-Build).
+
+### 3. Projekt kopieren und bauen
+
+```bash
+# Vom Mac aus — ohne _build/deps/.git/Env-Dateien:
+rsync -av --exclude _build --exclude deps --exclude .git --exclude '.env*' \
+  herz_schwarm_nerves/ blink@<Pi-IP>:~/herz_schwarm_nerves/
+
+# Auf dem Pi:
+cd ~/herz_schwarm_nerves
+mix deps.get
+MIX_ENV=prod mix compile
+mix assets.setup
+mix assets.deploy    # Tailwind/Esbuild laden dabei ihre linux-arm64-Binaries
+```
+
+### 4. Umgebungsvariablen
+
+`~/.config/herz-schwarm/herz-schwarm.env` (mit `chmod 600`):
+
+```bash
+SECRET_KEY_BASE=<lang — z. B. erzeugt mit: MIX_ENV=prod mix phx.gen.secret>
+PHX_HOST=<Pi-IP>
+PORT=4000
+```
+
+### 5. systemd-Unit
+
+`/etc/systemd/system/herz-schwarm.service`:
+
+```ini
+[Unit]
+Description=Herz-Schwarm (Phoenix-App)
+After=network-online.target
+
+[Service]
+User=blink
+WorkingDirectory=/home/blink/herz_schwarm_nerves
+Environment=MIX_ENV=prod
+EnvironmentFile=/home/blink/.config/herz-schwarm/herz-schwarm.env
+ExecStart=/usr/bin/mix phx.server
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now herz-schwarm
+```
+
+**Warum `mix phx.server` statt `mix release`:** `mix release` funktioniert in diesem Projekt nicht — die
+`releases:`-Konfiguration in `mix.exs` ist Nerves-spezifisch, es entsteht kein startbares Release.
+
+### 6. Bridge per USB am Pi
+
+- Nutzer in Gruppe `dialout`: `sudo usermod -aG dialout <user>` (danach neu anmelden bzw. Dienst neu starten)
+- Die App findet den Port per Auto-Detect (`/dev/ttyACM0` bei nativem USB-CDC, z. B. ESP32-C3)
+- Bei Bedarf fest vorgeben: `UART_DEVICE=/dev/ttyACM0` in die Env-Datei setzen
+- Bridge von hier aus flashen: siehe „ESP32-C3 flashen (die Bridge am Raspberry Pi)“
+
+### 7. Nach Code-Änderungen
+
+```bash
+# erneut rsync wie in Schritt 3, dann auf dem Pi:
+MIX_ENV=prod mix compile
+mix assets.deploy                       # nur bei Asset-Änderungen
+sudo systemctl restart herz-schwarm
+```
+
+### Erreichbar
+
+| URL | Zweck |
+|-----|-------|
+| `http://<Pi-IP>:4000/` | Dashboard (Effekte, Tap-Counter) |
+| `http://<Pi-IP>:4000/diagnose` | Monitoring / Diagnose |
+| `http://<Pi-IP>:4000/bridge-update` | Bridge-OTA über UART |
+
 ## Tests / IEx
 
 ```bash
@@ -516,7 +674,14 @@ EffectEngine.stop_all()
 - **Port verschwindet zwischen Runs**: Mac-USB-Energie-Management, USB-Hub mit eigener Stromversorgung verwenden
 - **C6 antwortet nicht auf JSON**: Baud-Rate prüfen (115200), Boot-Message "bridge ready" sollte kommen
 
-## Bekannte Bugs (Stand App 0.1.2)
+## Bekannte Bugs (Stand App 0.2.0 / Bridge 0.4.0)
+
+Behoben ab App 0.2.0 / Bridge 0.4.0 / Badge 1.5.0: BPM-Slider und Ambient-Farbwähler änderten nichts an den
+Effekten (`phx-change` feuert auf Einzel-Inputs nur innerhalb eines Formulars — die Regler sind jetzt in
+einem `form`/`field` mit `phx-change` gebunden); Effekte laufen endlos bis zum Stopp (Knopf „Alle Effekte
+auf den Badges stoppen“, Modus 12); Tap-Zähler Kette Badge → `{"evt":"tap",…}` → Dashboard-Karte
+„Tap-Counter“; LED-Farbordnung am Badge ist RGB (nicht BGR/GRB). Die Farbabnahme selbst (Rot/Blau an den
+1.5.0-Badges) ist im Feld noch zu prüfen.
 
 Behoben in 0.1.2: Bridge-Port-Default `/dev/ttyUSB0` / falscher `usbmodem*`-Port (jetzt status/pong-Probe),
 Plug.Cowboy-Translator-Crash (Config wurde nicht geladen, jetzt Bandit), Abziehen der Bridge wurde nicht
