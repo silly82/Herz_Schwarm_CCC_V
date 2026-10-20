@@ -42,7 +42,9 @@ Board coordinates from the top-left corner, top view (front = LEDs), millimetres
 - `place_badge.py` places the big and edge parts from its FIXED table and packs every other part at the free spot
   nearest the pin it serves (PACKED), using the courtyards; it reports overlaps and drilled pads under parts on the
   other side. It rebuilds the board on each run, so after routing starts, positions are edited in KiCad instead.
-- Fits behind it: a 25 × 30 mm LiPo pouch.
+- The cell behind it is not flat on the board. J102 (5.5 mm tall, x 19.9–30.1, y 7.4–16.6) and the top of J101's
+  shell (from y 25.7) lie inside a 30 × 30 mm cell's outline, and the charger U101 is under it. So the cell needs
+  the spacer of DESIGN.md D19, or J102 has to move out of the outline (DESIGN.md section 5, hazards 4 and 8).
 
 For routing (not started): USB D± leave the ESP32 on the side away from the connector (pins 25/26 face up), so they
 run around the chip, which full-speed USB tolerates; the crystal sits at the RF corner, so keep ground between its

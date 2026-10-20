@@ -1,4 +1,4 @@
-"""Build boards/badge/: the battery Herz-Schwarm badge (DESIGN.md sections 4 and 7).
+"""Build boards/badge/: the battery Herz-Schwarm badge (DESIGN.md sections 4 and 8).
 
 The MCU, IMU and LED blocks follow the reference (boards/reference/) with the fixes from DESIGN.md 2.4; the power
 block is new: USB-C, TP4054 charger, load-sharing P-FET, slide switch on a P-FET, ME6217 LDO, battery and VBUS

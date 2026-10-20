@@ -17,11 +17,19 @@ separately.
 | --- | --- | --- | --- | --- | --- |
 | Parts per board | $12.35 | $10.55 | $8.91 | $8.14 | $7.96 |
 | Extended-part fees per board (17 × about $3 per order) | $51.00 | $5.10 | $0.51 | $0.10 | $0.05 |
-| LiPo cell, 103030 1000 mAh (Alibaba, CHF, before shipping) | 1.06–1.19 | 0.84–1.09 | 0.68–0.85 | 0.68–0.85 | 0.68–0.85 |
+| LiPo cell, 103030 class, 800–900 mAh, landed in CH (CHF, estimate) | 15.45 | 6.0–6.8 | 2.0–2.4 | 1.5–1.9 | 1.4–1.8 |
 
-The cell prices are the listings found on 2026-10-17 (Huizhou Jiaxinrui, Shenzhen WLY, Dongguan Mozhong; minimum
-orders 1–5). Ask for a protection board, a JST PH 2.0 plug with pin 2 = +, and the real capacity; lithium cells
-ship as dangerous goods, which can cost more than the cells on small orders.
+Cell prices revised 2026-10-18 (`reports/Badge battery options.md`):
+- **What is landed.** Each price is the cell plus its share of freight, 8.1 % Swiss VAT and the INOBAT disposal fee
+  of CHF 0.05 per cell.
+- **1 board.** Swiss stock, a Jauch LP102530JU (680 mAh, fits) from Conrad CH via Galaxus.
+- **10 to 1000 boards.** Direct from a cell factory (Shenzhen WLY 103030, 900 mAh, or Ufine/BENZO 103030 or 903030,
+  800–850 mAh), by a Chinese "battery line" freight service.
+- **Express.** Dangerous-goods air freight instead costs about CHF 21 a cell at 10 and CHF 4 at 100.
+- **The real size.** A real 103030 holds 800–900 mAh, not 1000, and measures about 10.5 × 30.5 × 32–33 mm with its
+  protection board.
+- **The old figure.** The CHF 0.68–0.85 first listed here came from listings for other sizes.
+- **Before ordering.** Buy only cells that meet DESIGN.md D18.
 
 ## Cost drivers
 
