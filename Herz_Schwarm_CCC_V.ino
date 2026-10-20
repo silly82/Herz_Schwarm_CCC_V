@@ -2,6 +2,7 @@
 #include <WiFi.h>
 #include <FastLED.h>
 #include <esp_wifi.h>
+#include <Preferences.h>
 
 // Serial-Ausgaben blockieren und können die Animation ruckeln lassen — Standard: aus.
 // Aktivieren: hier auf 1 setzen oder Build-Flag: -DENABLE_SERIAL_DEBUG=1
@@ -27,8 +28,8 @@
  *              Commits seit 1.2.0 (oder seit letztem A.B.C-Wechsel).
  */
 #define FW_VERSION_MAJOR 1
-#define FW_VERSION_MINOR   4
-#define FW_VERSION_PATCH   1  // 1.4.1: Welle läuft endlos (Zyklus 4 s) bis Stopp über Modus 10
+#define FW_VERSION_MINOR   5
+#define FW_VERSION_PATCH   0  // 1.5.0: Tap-Counter (Modus 11); Effekte laufen endlos bis „Alle stoppen“ (Modus 12), letzter Effekt gewinnt; 1.4.1: Welle läuft endlos (Zyklus 4 s) bis Stopp über Modus 10
 #define FW_DEBUG_BUILD     1  // Nur Debug-Zweig: bei sichtbarem neuen Debug-Stand +1, max 99
 
 #if FW_DEBUG_BUILD < 1 || FW_DEBUG_BUILD > 99
@@ -55,10 +56,12 @@
 #define BEAT_UNITS_PER_PULSE 65536UL
 #define BEAT_JUMP_THRESHOLD  (4 * BEAT_UNITS_PER_PULSE)
 
-// Remote-Effekte (Basisstation / kompatibles Paket): mode im SyncPacket
-#define SYNC_MODE_VIRUS    1  // weißer Blitz (wie Morse -.-.) — 3 s
-#define SYNC_MODE_RAINBOW  2  // Singularity-Regenbogen — 15 s
-#define SYNC_MODE_PRIME    3  // Primzahl-Puls + Sparkles — 12 s
+// Remote-Effekte (Basisstation / kompatibles Paket): mode im SyncPacket.
+// Die visuellen Effekte (1–4, 6–8) laufen endlos, bis Modus 12 („Alle stoppen“) oder ein anderer
+// visueller Effekt kommt (letzter gewinnt). Nur Beat (150-ms-Puls) und Identify (10 s) laufen aus.
+#define SYNC_MODE_VIRUS    1  // weißer Blitz (wie Morse -.-.) — Zyklus 3 s
+#define SYNC_MODE_RAINBOW  2  // Singularity-Regenbogen
+#define SYNC_MODE_PRIME    3  // Primzahl-Puls + Sparkles
 #define SYNC_MODE_WAVE     4  // Welle: ripple von Basisstation nach RSSI-Distanz
 #define SYNC_MODE_BEAT     5  // Beat-Sync Puls (manuell oder BPM)
 #define SYNC_MODE_ZONE     6  // RSSI-Zonen-Farben
@@ -66,12 +69,29 @@
 #define SYNC_MODE_STROBE   8  // Strobe-Blitz
 #define SYNC_MODE_IDENTIFY 9  // "Badge finden": nur das Badge mit der Ziel-MAC blinkt grün
 #define SYNC_MODE_WAVE_STOP 10 // Welle manuell stoppen (Welle läuft sonst endlos im 4-s-Zyklus)
+#define SYNC_MODE_TAP      11 // Tap-Counter: virusID = Zählerstand (monoton, 32 Bit); weitergeleitet + 6 Byte Ursprungs-MAC
+#define SYNC_MODE_STOP_ALL 12 // „Alle stoppen“: global (virusID 0), räumt alle Effekte außer Identify ab; begrenzt weitergeleitet
 #define REMOTE_RAINBOW_MS  15000
 #define REMOTE_PRIME_MS    12000
 #define WAVE_DURATION_MS   4000    // Länge eines Wellenzyklus; die Welle wiederholt ihn endlos bis zum Stopp
 #define WAVE_STOP_FWD_COUNT  3     // Stopp-Paket wird max. so oft weitergeleitet …
 #define WAVE_STOP_FWD_GAP_MS 60    // … im Abstand von ~60 ms (nicht blockierend, aus loop())
 #define WAVE_STOP_LOCK_MS    1000  // danach keine erneute Weiterleitung (kein Echo-Sturm)
+#define ALL_STOP_FWD_COUNT   3     // „Alle stoppen“ (Modus 12): gleiches Muster wie der Wellen-Stopp …
+#define ALL_STOP_FWD_GAP_MS  60
+#define ALL_STOP_LOCK_MS     1000
+// Tap-Counter: kurzer BOOT-Tastendruck (<= 250 ms, wie Morse-Punkt) zählt als Tap
+#define TAP_SEND_COUNT     3       // je Tap so viele Pakete …
+#define TAP_SEND_GAP_MS    60      // … im Abstand von ~60 ms (nicht blockierend, aus loop())
+#define TAP_RESEND_MS      1200    // einmal Nachsendung nach dem letzten Burst (jenseits der Weiterleitungs-Sperre)
+#define TAP_BOOT_DELAY_MS  500     // Stand nach dem Boot einmal melden (Funk ist dann bereit)
+#define TAP_FWD_COUNT      3       // fremde Tap-Pakete: max. so oft weiterleiten …
+#define TAP_FWD_GAP_MS     60      // … im Abstand von ~60 ms
+#define TAP_FWD_LOCK_MS    1000    // danach keine neue Weiterleitung (kein Echo-Sturm)
+#define TAP_SEEN_SLOTS     8       // Dedup-Tabelle: höchster Stand je Absender-MAC, ältester Eintrag fliegt raus
+#define TAP_SAVE_INTERVAL_MS 30000 // Zählerstand höchstens alle 30 s in den Flash (Verschleiß)
+#define TAP_NVS_NAMESPACE  "hstap"
+#define TAP_NVS_KEY        "cnt"
 #define WAVE_PULSE_MS      700
 #define WAVE_MAX_DELAY_MS  (WAVE_DURATION_MS - WAVE_PULSE_MS)  // spätester Pulsbeginn nach Wellenstart
 #define WAVE_STATION_SPAN_MS 2000  // direkt von der Basis: -45 dBm → 0 ms … -95 dBm → 2000 ms
@@ -104,6 +124,10 @@
 // Damit rechnet der Empfänger auf den gemeinsamen Start zurück, statt beim Empfang neu zu
 // beginnen. Ältere Firmware liest nur 17 Byte.
 #define WAVE_PACKET_LEN (sizeof(SyncPacket) + 4)
+// Tap-Pakete: direkt vom Badge = SyncPacket (17 Byte, MAC = Absender). Von einem Nachbarn
+// weitergeleitet: + 6 Byte MAC des ursprünglichen Badges (23 Byte). Ältere Firmware kennt
+// Modus 11 nicht und ignoriert beide Längen.
+#define TAP_FWD_PACKET_LEN (sizeof(SyncPacket) + 6)
 
 struct __attribute__((packed)) SyncPacket {
     uint32_t magic_id;
@@ -159,10 +183,21 @@ struct EffectState {
 };
 enum EffectIdx : uint8_t { E_VIRUS=0, E_RAINBOW, E_PRIME, E_WAVE, E_BEAT, E_ZONE, E_AMBIENT, E_STROBE, E_IDENTIFY, E_COUNT };
 EffectState fx[E_COUNT] = {};
+// Nominale Effektdauer / Zykluslänge. Ablaufen (active=false nach Ablauf) tun nur Beat und Identify;
+// alle anderen Effekte laufen endlos (Render-Fenster modulo bzw. statisch, siehe loop()).
 static const uint32_t fxDurationMs[E_COUNT] = {
     3000, REMOTE_RAINBOW_MS, REMOTE_PRIME_MS, WAVE_DURATION_MS,
     BEAT_PULSE_MS, REMOTE_ZONE_MS, REMOTE_AMBIENT_MS, STROBE_DURATION_MS, IDENTIFY_MS
 };
+
+// Visuelle Effekt-Slots: ein Start löscht die anderen (letzter gewinnt). E_BEAT und E_IDENTIFY
+// gehören nicht dazu. Aufruf unter stateMux.
+static void clearOtherVisualFx(uint8_t keep) {
+    static const uint8_t visual[] = { E_VIRUS, E_RAINBOW, E_PRIME, E_WAVE, E_ZONE, E_AMBIENT, E_STROBE };
+    for (uint8_t i = 0; i < sizeof(visual); i++) {
+        if (visual[i] != keep) fx[visual[i]].active = false;
+    }
+}
 
 // Wave-spezifisch: fx[E_WAVE].startTime = Wellenstart an der Basis (lokale Zeit),
 // waveDelay = eigener Pulsbeginn danach (kürzester bekannter Weg, siehe OnDataRecv)
@@ -179,6 +214,34 @@ static uint32_t stopFwdNext = 0;       // Zeitpunkt der nächsten Sendung
 static uint32_t stopFwdId = 0;         // Ziel-Wellen-ID des weiterzuleitenden Stopps (unverändert aus dem Paket)
 static uint32_t stopLastSent = 0;      // Zeitpunkt der letzten Sendung (Beginn der Sperre)
 static bool     stopLockActive = false;
+// „Alle stoppen“ (Modus 12): gleiches Muster, aber global — keine ID, Dedup nur über die Sperre
+static uint8_t  allStopFwdLeft = 0;
+static uint32_t allStopFwdNext = 0;
+static uint32_t allStopLastSent = 0;
+static bool     allStopLockActive = false;
+
+// Tap-Counter, empfangene Stände (OnDataRecv schreibt, loop() liest) — alles unter stateMux
+struct TapSeen {
+    uint8_t  mac[6];
+    uint32_t count;     // höchster gesehener Stand dieser MAC
+    uint32_t stamp;     // millis() der letzten Aktualisierung (ältester Eintrag wird ersetzt)
+    bool     used;
+};
+static TapSeen  tapSeen[TAP_SEEN_SLOTS];
+static uint8_t  tapFwdLeft = 0;        // noch zu sendende Weiterleitungen
+static uint32_t tapFwdNext = 0;
+static uint8_t  tapFwdMac[6];          // Ursprungs-MAC des weiterzuleitenden Pakets
+static uint32_t tapFwdCount = 0;
+static uint32_t tapFwdLastSent = 0;
+static bool     tapFwdLockActive = false;
+// Eigener Tap-Zähler: nur loop() (Core 1) liest/schreibt → kein Mutex nötig
+static uint32_t tapCount = 0;
+static bool     tapDirty = false;      // seit dem letzten Speichern geändert
+static uint32_t tapLastSave = 0;
+static uint8_t  tapBurstLeft = 0;      // noch zu sendende Pakete des eigenen Stands
+static uint32_t tapBurstNext = 0;
+static bool     tapResendPending = false;
+static uint32_t tapResendAt = 0;
 
 // Ambient-spezifisch
 uint8_t ambientR = 0, ambientG = 0, ambientB = 0;
@@ -240,6 +303,76 @@ static void sendSync(uint8_t mode, uint32_t fxId) {
         esp_now_send(broadcastMac, buf, sizeof(buf));
     } else {
         esp_now_send(broadcastMac, (uint8_t *)&txData, sizeof(txData));
+    }
+}
+
+// Tap-Paket senden (nur aus loop()). origin == nullptr: eigener Stand, 17 Byte (unverändertes
+// SyncPacket). Sonst Weiterleitung: gleiches Paket + 6 Byte Ursprungs-MAC. Nimmt stateMux nicht.
+static void sendTap(const uint8_t *origin, uint32_t count) {
+    SyncPacket p;
+    memset(&p, 0, sizeof(p));
+    p.magic_id = MAGIC_ID;
+    p.beatCounter = millis();
+    p.virusID = count;
+    p.mode = SYNC_MODE_TAP;
+    p.ver_major = FW_VERSION_MAJOR;
+    p.ver_minor = FW_VERSION_MINOR;
+    p.ver_rel = FW_VERSION_PATCH;
+#if ENABLE_SERIAL_DEBUG
+    p.ver_dbg = FW_DEBUG_BUILD;
+#endif
+    uint8_t buf[TAP_FWD_PACKET_LEN];
+    memcpy(buf, &p, sizeof(p));
+    size_t n = sizeof(p);
+    if (origin) {
+        memcpy(buf + n, origin, 6);
+        n += 6;
+    }
+    esp_now_send(broadcastMac, buf, n);  // Fehler ignorieren — Zählerstand ist kumulativ
+}
+
+// Fremdes Tap-Paket aufnehmen. Aufruf unter stateMux. Nur ein höherer Stand als der zur MAC
+// bekannte wird übernommen und (begrenzt) weitergeleitet; gesendet wird in loop().
+// Ist die Weiterleitung gerade belegt/gesperrt, bleibt die Tabelle unverändert: ein späteres
+// Paket (Nachsendung, nächster Tap — der Zähler ist kumulativ) wird dann noch weitergeleitet.
+static void tapOnReceive(const uint8_t *origin, uint32_t count, uint32_t now) {
+    int slot = -1, oldest = 0;
+    for (int i = 0; i < TAP_SEEN_SLOTS; i++) {
+        if (!tapSeen[i].used) {
+            if (slot < 0 || tapSeen[slot].used) slot = i;   // freier Slot hat Vorrang
+        } else if (memcmp(tapSeen[i].mac, origin, 6) == 0) {
+            slot = i;
+            break;
+        } else if (tapSeen[i].stamp - tapSeen[oldest].stamp > 0x80000000UL) {
+            oldest = i;  // i ist älter als oldest (vorzeichenrichtig verglichen)
+        }
+    }
+    const bool known = (slot >= 0 && tapSeen[slot].used && memcmp(tapSeen[slot].mac, origin, 6) == 0);
+    if (known && count <= tapSeen[slot].count) return;  // nichts Neues (Wiederholung/Echo)
+    if (slot < 0) slot = oldest;                         // Tabelle voll: ältesten Eintrag ersetzen
+
+    if (tapFwdLeft > 0 && memcmp(tapFwdMac, origin, 6) == 0) {
+        tapFwdCount = count;  // gleiche MAC noch in Weiterleitung: neuesten Stand mitnehmen
+    } else if (tapFwdLeft == 0 && !(tapFwdLockActive && now - tapFwdLastSent < TAP_FWD_LOCK_MS)) {
+        memcpy(tapFwdMac, origin, 6);
+        tapFwdCount = count;
+        tapFwdLeft = TAP_FWD_COUNT;
+        tapFwdNext = now;
+    } else {
+        return;  // belegt oder gesperrt: Tabelle nicht ändern, später erneut versuchen
+    }
+    memcpy(tapSeen[slot].mac, origin, 6);
+    tapSeen[slot].count = count;
+    tapSeen[slot].stamp = now;
+    tapSeen[slot].used = true;
+}
+
+// Zählerstand sichern: Fehler dürfen den Betrieb nicht stören (dann wird übersprungen).
+static void tapSave() {
+    Preferences prefs;
+    if (prefs.begin(TAP_NVS_NAMESPACE, false)) {
+        prefs.putUInt(TAP_NVS_KEY, tapCount);
+        prefs.end();
     }
 }
 
@@ -318,7 +451,8 @@ void OnDataRecv(const esp_now_recv_info_t *recv_info, const uint8_t *incomingDat
     // senden ihr millis() als beatCounter, das würde den Schwarm bei jedem Effekt
     // in der Phase springen lassen. Bei Ambient ist beatCounter eine Farbe.
     const bool fromStation = hasVer && rx.ver_major == 0;
-    if (rx.mode != SYNC_MODE_AMBIENT && !fromStation) {
+    // (Tap-Pakete tragen millis() im beatCounter → nie als Takt übernehmen.)
+    if (rx.mode != SYNC_MODE_AMBIENT && rx.mode != SYNC_MODE_TAP && !fromStation) {
         int32_t ahead = (int32_t)(rx.beatCounter - heartBeatState);
         if (ahead > (int32_t)BEAT_JUMP_THRESHOLD) {
             heartBeatState = rx.beatCounter;
@@ -329,10 +463,13 @@ void OnDataRecv(const esp_now_recv_info_t *recv_info, const uint8_t *incomingDat
     }
 
     #define FX_START(idx, rxid) do { if ((rxid) != fx[idx].id) { fx[idx].id = (rxid); fx[idx].startTime = now; fx[idx].active = true; } } while(0)
+    // Visueller Effekt: wie FX_START, löscht zusätzlich die anderen visuellen Slots (letzter gewinnt).
+    // Dieselbe ID erneut (Echo/Weiterleitung eines bereits gesehenen oder gestoppten Effekts) tut nichts.
+    #define VIS_START(idx, rxid) do { if ((rxid) != fx[idx].id) { clearOtherVisualFx(idx); fx[idx].id = (rxid); fx[idx].startTime = now; fx[idx].active = true; } } while(0)
 
-    if (rx.mode == SYNC_MODE_VIRUS)   FX_START(E_VIRUS,   rx.virusID);
-    if (rx.mode == SYNC_MODE_RAINBOW) FX_START(E_RAINBOW, rx.virusID);
-    if (rx.mode == SYNC_MODE_PRIME)   FX_START(E_PRIME,   rx.virusID);
+    if (rx.mode == SYNC_MODE_VIRUS)   VIS_START(E_VIRUS,   rx.virusID);
+    if (rx.mode == SYNC_MODE_RAINBOW) VIS_START(E_RAINBOW, rx.virusID);
+    if (rx.mode == SYNC_MODE_PRIME)   VIS_START(E_PRIME,   rx.virusID);
     if (rx.mode == SYNC_MODE_WAVE) {
         // RSSI genau dieses Pakets (nicht smoothRSSI: der mittelt über alle Nachbarn).
         // Badge-Pakete ab 1.4.0 tragen die Zyklus-Phase + Sender-Verzögerung;
@@ -349,6 +486,7 @@ void OnDataRecv(const esp_now_recv_info_t *recv_info, const uint8_t *incomingDat
             // Gestoppte Welle (ggf. von Nachbarn weitergeleitet): ignorieren
         } else if (rx.virusID != fx[E_WAVE].id) {
             // Neue Welle bzw. später Einstieg in die laufende Welle: immer übernehmen
+            clearOtherVisualFx(E_WAVE);
             fx[E_WAVE].id = rx.virusID;
             fx[E_WAVE].startTime = now - elapsed;
             fx[E_WAVE].active = true;
@@ -383,9 +521,30 @@ void OnDataRecv(const esp_now_recv_info_t *recv_info, const uint8_t *incomingDat
             stopFwdNext = now;
         }
     }
+    if (rx.mode == SYNC_MODE_STOP_ALL) {
+        // Alle Effekte abräumen (auch Welle und Beat), nur Identify läuft seine 10 s zu Ende.
+        // Die IDs bleiben stehen: Echos/verspätete Pakete derselben Effekte starten nichts neu.
+        for (int i = 0; i < E_COUNT; i++) {
+            if (i != E_IDENTIFY) fx[i].active = false;
+        }
+        // Begrenzt weiterleiten (global, kein ID-Vergleich): nur wenn nicht schon eine Weiterleitung
+        // läuft und die Sperre abgelaufen ist; gesendet wird in loop().
+        const bool locked = allStopLockActive && (now - allStopLastSent < ALL_STOP_LOCK_MS);
+        if (allStopFwdLeft == 0 && !locked) {
+            allStopFwdLeft = ALL_STOP_FWD_COUNT;
+            allStopFwdNext = now;
+        }
+    }
+    if (rx.mode == SYNC_MODE_TAP && hasVer && !fromStation && rx.virusID != 0) {
+        // Direkt: Absender = Badge. Weitergeleitet (23 Byte): Ursprungs-MAC im Anhang.
+        const uint8_t *origin = (len >= (int)TAP_FWD_PACKET_LEN)
+            ? incomingData + sizeof(SyncPacket) : recv_info->src_addr;
+        if (memcmp(origin, ownMac, 6) != 0) tapOnReceive(origin, rx.virusID, now);  // eigene Echos ignorieren
+    }
     if (rx.mode == SYNC_MODE_BEAT)    FX_START(E_BEAT,    rx.virusID);
-    if (rx.mode == SYNC_MODE_ZONE)    FX_START(E_ZONE,    rx.virusID);
+    if (rx.mode == SYNC_MODE_ZONE)    VIS_START(E_ZONE,    rx.virusID);
     if (rx.mode == SYNC_MODE_AMBIENT && rx.virusID != fx[E_AMBIENT].id) {
+        clearOtherVisualFx(E_AMBIENT);
         fx[E_AMBIENT].id = rx.virusID;
         fx[E_AMBIENT].startTime = now;
         fx[E_AMBIENT].active = true;
@@ -393,11 +552,12 @@ void OnDataRecv(const esp_now_recv_info_t *recv_info, const uint8_t *incomingDat
         ambientG = (rx.beatCounter >> 8) & 0xFF;
         ambientB = rx.beatCounter & 0xFF;
     }
-    if (rx.mode == SYNC_MODE_STROBE)  FX_START(E_STROBE,  rx.virusID);
+    if (rx.mode == SYNC_MODE_STROBE)  VIS_START(E_STROBE,  rx.virusID);
     if (rx.mode == SYNC_MODE_IDENTIFY && len >= (int)IDENTIFY_PACKET_LEN &&
         memcmp(incomingData + sizeof(SyncPacket), ownMac, 6) == 0) {
         FX_START(E_IDENTIFY, rx.virusID);
     }
+    #undef VIS_START
     #undef FX_START
     portEXIT_CRITICAL(&stateMux);
 }
@@ -408,6 +568,20 @@ void setup() {
     printFwVersionBanner();
 #endif
     pinMode(BUTTON_PIN, INPUT_PULLUP);
+
+    // Tap-Zählerstand laden (Fehler → bei 0 starten) und nach dem Boot einmal melden
+    {
+        Preferences prefs;
+        if (prefs.begin(TAP_NVS_NAMESPACE, false)) {
+            tapCount = prefs.getUInt(TAP_NVS_KEY, 0);
+            prefs.end();
+        }
+        tapLastSave = millis();
+        if (tapCount > 0) {
+            tapBurstLeft = TAP_SEND_COUNT;
+            tapBurstNext = millis() + TAP_BOOT_DELAY_MS;
+        }
+    }
 
     // Herz-Bitmaske einmalig aus Array aufbauen
     for (int i = 0; i < 64; i++) {
@@ -431,8 +605,9 @@ void setup() {
     esp_now_add_peer(&peerInfo);
     esp_now_register_recv_cb(OnDataRecv);
 
-    // WICHTIG: GRB für Waveshare Matrix
-    FastLED.addLeds<WS2812B, LED_PIN, BGR>(leds, NUM_LEDS);
+    // WICHTIG: Waveshare-Matrix ist hier RGB verdrahtet — am Gerät verifiziert:
+    // mit BGR waren Rot und Blau vertauscht. Rückweg: BGR bzw. GRB (GRB wäre falsch: Rot würde Grün).
+    FastLED.addLeds<WS2812B, LED_PIN, RGB>(leds, NUM_LEDS);
     FastLED.clear();
     FastLED.show();
 }
@@ -456,11 +631,19 @@ void loop() {
 #endif
         btnDownTime = 0;
         lastBtnRelease = now;
+        if (sym == '.' && tapCount < UINT32_MAX) {  // Druck <= 250 ms = Tap (zusätzlich zur Morse-Logik)
+            tapCount++;
+            tapDirty = true;
+            tapBurstLeft = TAP_SEND_COUNT;
+            tapBurstNext = now;
+            tapResendPending = false;
+        }
     }
     if (morseLen > 0 && (now - lastBtnRelease > 800)) {
         if (strcmp(morseBuf, "-.-.") == 0) {
             uint32_t id = (uint32_t)(esp_random() % 99999) + 1;
             portENTER_CRITICAL(&stateMux);
+            clearOtherVisualFx(E_VIRUS);  // letzter Effekt gewinnt (läuft endlos, bis „Alle stoppen“)
             fx[E_VIRUS].id = id;
             fx[E_VIRUS].startTime = now;
             fx[E_VIRUS].active = true;
@@ -529,7 +712,8 @@ void loop() {
     lastBeatMs = now;
     frameBeat = heartBeatState;
 
-    // Abgelaufene Effekte deaktivieren, Snapshot für das Rendern
+    // Nur Beat und Identify laufen aus; alle visuellen Effekte laufen endlos (bis Modus 12 oder
+    // ein anderer visueller Effekt). Snapshot für das Rendern.
     for (int i = 0; i < E_COUNT; i++) {
         if (i == E_WAVE) {
             // Welle läuft endlos: nie ablaufen, sondern startTime um ganze Zyklen vorsetzen
@@ -539,7 +723,8 @@ void loop() {
                 uint32_t age = now - fx[i].startTime;
                 if (age >= WAVE_DURATION_MS) fx[i].startTime += (age / WAVE_DURATION_MS) * WAVE_DURATION_MS;
             }
-        } else if (fx[i].active && now - fx[i].startTime >= fxDurationMs[i]) {
+        } else if ((i == E_BEAT || i == E_IDENTIFY) && fx[i].active &&
+                   now - fx[i].startTime >= fxDurationMs[i]) {
             fx[i].active = false;
         }
         fs[i] = fx[i];
@@ -562,11 +747,64 @@ void loop() {
         }
     }
 
+    // „Alle stoppen“-Weiterleitung: gleiches Muster (max. 3 Sendungen, ~60 ms Abstand, dann Sperre)
+    bool sendAllStopNow = false;
+    if (allStopFwdLeft > 0 && (int32_t)(now - allStopFwdNext) >= 0) {
+        sendAllStopNow = true;
+        allStopFwdLeft--;
+        allStopFwdNext = now + ALL_STOP_FWD_GAP_MS;
+        if (allStopFwdLeft == 0) {  // letzte Sendung: ab jetzt 1000 ms Sperre
+            allStopLastSent = now;
+            allStopLockActive = true;
+        }
+    }
+
     portEXIT_CRITICAL(&stateMux);
 
     // sendSync nimmt stateMux selbst (nicht verschachteln) — daher erst hier. Es setzt
     // txData.mode, der reguläre Sync-Block unten sendet dadurch im selben Frame direkt danach.
     if (sendStopNow) sendSync(SYNC_MODE_WAVE_STOP, stopIdS);
+    if (sendAllStopNow) sendSync(SYNC_MODE_STOP_ALL, 0);
+
+    // Tap-Counter senden (nicht blockierend, höchstens je ein Paket eigener Stand / Weiterleitung pro Frame)
+    if (tapBurstLeft > 0 && (int32_t)(now - tapBurstNext) >= 0) {
+        sendTap(nullptr, tapCount);
+        tapBurstLeft--;
+        tapBurstNext = now + TAP_SEND_GAP_MS;
+        if (tapBurstLeft == 0) {
+            tapResendPending = true;
+            tapResendAt = now + TAP_RESEND_MS;
+        }
+    } else if (tapResendPending && tapBurstLeft == 0 && (int32_t)(now - tapResendAt) >= 0) {
+        tapResendPending = false;
+        sendTap(nullptr, tapCount);
+    }
+    {
+        bool fwdNow = false;
+        uint8_t fwdMac[6];
+        uint32_t fwdCount = 0;
+        portENTER_CRITICAL(&stateMux);
+        const uint32_t t = millis();
+        if (tapFwdLeft > 0 && (int32_t)(t - tapFwdNext) >= 0) {
+            fwdNow = true;
+            memcpy(fwdMac, tapFwdMac, 6);
+            fwdCount = tapFwdCount;
+            tapFwdLeft--;
+            tapFwdNext = t + TAP_FWD_GAP_MS;
+            if (tapFwdLeft == 0) {  // letzte Sendung: ab jetzt TAP_FWD_LOCK_MS Sperre
+                tapFwdLastSent = t;
+                tapFwdLockActive = true;
+            }
+        }
+        portEXIT_CRITICAL(&stateMux);
+        if (fwdNow) sendTap(fwdMac, fwdCount);
+    }
+    // Zählerstand gedrosselt sichern (höchstens alle 30 s, nur bei Änderung)
+    if (tapDirty && now - tapLastSave >= TAP_SAVE_INTERVAL_MS) {
+        tapDirty = false;
+        tapLastSave = now;
+        tapSave();
+    }
 
     uint8_t currentBright = BRIGHT_MIN + (uint8_t)(power * (BRIGHT_MAX - BRIGHT_MIN));
 
@@ -586,14 +824,28 @@ void loop() {
         activeMode = SYNC_MODE_IDENTIFY;
         activeFxId = fs[E_IDENTIFY].id;
     }
-    else if (fs[E_VIRUS].active && (now - fs[E_VIRUS].startTime < 3000)) {
-        // MORSE / REMOTE VIRUS BLITZ
-        uint32_t flash = (now - fs[E_VIRUS].startTime) % 300;
+    else if (fs[E_BEAT].active && (now - fs[E_BEAT].startTime < BEAT_PULSE_MS)) {
+        // Beat-Puls hat Vorrang vor den endlosen visuellen Effekten (nur innerhalb seiner 150 ms)
+        uint32_t elapsed = now - fs[E_BEAT].startTime;
+        uint8_t brightness;
+        if (elapsed < BEAT_PULSE_MS / 2) {
+            brightness = (uint8_t)((elapsed * 255) / (BEAT_PULSE_MS / 2));
+        } else {
+            brightness = (uint8_t)(((BEAT_PULSE_MS - elapsed) * 255) / (BEAT_PULSE_MS / 2));
+        }
+        fill_solid(leds, NUM_LEDS, CRGB::White);
+        nscale8(leds, NUM_LEDS, brightness);
+        activeMode = SYNC_MODE_BEAT;
+        activeFxId = fs[E_BEAT].id;
+    }
+    else if (fs[E_VIRUS].active) {
+        // MORSE / REMOTE VIRUS BLITZ — endlos: Zyklus 3000 ms ist ein Vielfaches von 300 ms
+        uint32_t flash = ((now - fs[E_VIRUS].startTime) % fxDurationMs[E_VIRUS]) % 300;
         if (flash < 150) fill_solid(leds, NUM_LEDS, CRGB::White);
         activeMode = SYNC_MODE_VIRUS;
         activeFxId = fs[E_VIRUS].id;
     }
-    else if (fs[E_RAINBOW].active && (now - fs[E_RAINBOW].startTime < REMOTE_RAINBOW_MS)) {
+    else if (fs[E_RAINBOW].active) {  // endlos (hueOffset läuft weiter, kein Zeitfenster nötig)
         hueOffset += 5;
         modeBpm = 100;
         pulse = swarmPulse(150, 255);
@@ -601,7 +853,7 @@ void loop() {
         activeMode = SYNC_MODE_RAINBOW;
         activeFxId = fs[E_RAINBOW].id;
     }
-    else if (fs[E_PRIME].active && (now - fs[E_PRIME].startTime < REMOTE_PRIME_MS)) {
+    else if (fs[E_PRIME].active) {  // endlos (Puls über den Schwarm-Takt, kein Zeitfenster nötig)
         modeBpm = 80;
         pulse = swarmPulse(120, 255);
         fill_solid(leds, NUM_LEDS, heartColor);
@@ -629,20 +881,7 @@ void loop() {
         activeMode = SYNC_MODE_WAVE;
         activeFxId = fs[E_WAVE].id;
     }
-    else if (fs[E_BEAT].active && (now - fs[E_BEAT].startTime < BEAT_PULSE_MS)) {
-        uint32_t elapsed = now - fs[E_BEAT].startTime;
-        uint8_t brightness;
-        if (elapsed < BEAT_PULSE_MS / 2) {
-            brightness = (uint8_t)((elapsed * 255) / (BEAT_PULSE_MS / 2));
-        } else {
-            brightness = (uint8_t)(((BEAT_PULSE_MS - elapsed) * 255) / (BEAT_PULSE_MS / 2));
-        }
-        fill_solid(leds, NUM_LEDS, CRGB::White);
-        nscale8(leds, NUM_LEDS, brightness);
-        activeMode = SYNC_MODE_BEAT;
-        activeFxId = fs[E_BEAT].id;
-    }
-    else if (fs[E_ZONE].active && (now - fs[E_ZONE].startTime < REMOTE_ZONE_MS)) {
+    else if (fs[E_ZONE].active) {  // endlos (statische Farbe + Schwarm-Puls)
         CRGB zoneColor;
         if (rssiSnapshot > -55) zoneColor = ZONE0_COLOR;
         else if (rssiSnapshot > -75) zoneColor = ZONE1_COLOR;
@@ -654,12 +893,14 @@ void loop() {
         activeMode = SYNC_MODE_ZONE;
         activeFxId = fs[E_ZONE].id;
     }
-    else if (fs[E_AMBIENT].active && (now - fs[E_AMBIENT].startTime < REMOTE_AMBIENT_MS)) {
+    else if (fs[E_AMBIENT].active) {  // endlos (statische Farbe)
         fill_solid(leds, NUM_LEDS, CRGB(ambR, ambG, ambB));
         activeMode = SYNC_MODE_AMBIENT;
         activeFxId = fs[E_AMBIENT].id;
     }
-    else if (fs[E_STROBE].active && (now - fs[E_STROBE].startTime < STROBE_DURATION_MS)) {
+    else if (fs[E_STROBE].active) {
+        // endlos; bewusst ohne Modulo STROBE_DURATION_MS: 2000/80 = 25 (ungerade) würde beim Wrap
+        // einen doppelt langen Blitz ergeben — die 160-ms-Periode läuft direkt weiter
         uint32_t elapsed = now - fs[E_STROBE].startTime;
         if ((elapsed / STROBE_FLASH_MS) % 2 == 0) {
             fill_solid(leds, NUM_LEDS, CRGB::White);

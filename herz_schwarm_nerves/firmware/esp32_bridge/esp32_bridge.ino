@@ -21,6 +21,7 @@
  *   {"evt":"pong","peers":5,"uptime":12345,"free_heap":200000,"fw":"0.3.0","ota":"idle"}
  *   {"evt":"peer","mac":"A0:F2:62:EC:3B:B4","rssi":-74,"fw":"1.3.0","age":40}   (je Station)
  *   {"evt":"peers","seq":45,"n":5}                                             (Ende der Liste)
+ *   {"evt":"tap","mac":"A0:F2:62:EC:3B:B4","count":123}                    (Tap-Zählerstand eines Badges, nur bei neuem Höchststand)
  *   {"evt":"log","msg":"bridge ready"}
  *   {"evt":"err","msg":"json parse failed"}
  *   {"evt":"err","seq":47,"msg":"busy: ota"}                                  (Fehler mit seq, wo bekannt)
@@ -44,6 +45,12 @@
  *   STATION_STALE_MS nichts gesendet haben, gelten als offline und
  *   blockieren keine Retries mehr.
  *
+ * Tap-Counter (Badge-FW >= 1.5): Badges senden SyncPackets mit mode = SYNC_MODE_TAP (11)
+ *   und virusID = Tap-Zählerstand (monoton, 32 Bit). Von Nachbarn weitergeleitete Pakete
+ *   hängen die 6-Byte-MAC des ursprünglichen Badges an (23 Byte), sonst gilt die Absender-MAC.
+ *   Die Bridge merkt sich pro MAC den höchsten Stand (Station.taps) und meldet nur höhere
+ *   Stände als "tap"-Event; Wiederholungen/Weiterleitungen zählen nie doppelt. Sie leitet nicht weiter.
+ *
  * Benötigt: ArduinoJson >= 7 (Library Manager: "ArduinoJson" by Benoit Blanchon)
  */
 
@@ -58,8 +65,8 @@
 #define CCC_CHANNEL     13
 #define MAGIC_ID        0x421337CC
 #define BRIDGE_FW_MAJOR 0
-#define BRIDGE_FW_MINOR 3
-#define BRIDGE_FW_PATCH 0
+#define BRIDGE_FW_MINOR 4
+#define BRIDGE_FW_PATCH 0  // 0.4.0: Tap-Counter (Modus 11) → UART-Event {"evt":"tap",…}; „Alle stoppen“ (Modus 12, endlose Effekte)
 
 #define MAX_JSON_LEN    256
 #define SERIAL_BAUD     115200
@@ -76,6 +83,9 @@
 #define SYNC_PACKET_LEGACY_LEN 13
 #define SYNC_MODE_IDENTIFY 9     // "Badge finden": SyncPacket + 6 Byte Ziel-MAC (Badge-FW >= 1.3)
 #define SYNC_MODE_WAVE_STOP 10   // Welle manuell beenden (Badge-FW, die Modus 4 endlos laufen lässt)
+#define SYNC_MODE_TAP      11    // Tap-Counter: virusID = Zählerstand; weitergeleitet + 6 Byte Ursprungs-MAC (Badge-FW >= 1.5)
+#define TAP_FWD_PACKET_LEN (sizeof(SyncPacket) + 6)
+#define SYNC_MODE_STOP_ALL 12    // „Alle stoppen“: räumt alle Effekte ab (global, virusID 0; Badge-FW >= 1.5). Von der App sendbar, anders als 11
 #define IDENTIFY_REPEATS   3     // Funk ist verlustbehaftet; Badge dedupliziert per virusID
 
 struct __attribute__((packed)) SyncPacket {
@@ -101,6 +111,8 @@ struct Station {
     int8_t   rssi;
     bool     hasVer;     // false bei 13-Byte-Paketen alter Firmware
     uint8_t  ver[3];
+    uint32_t taps;       // höchster gesehener Tap-Zählerstand dieser MAC (0 = keiner)
+    uint32_t tapsSent;   // davon bereits als UART-Event gemeldet (loop() meldet taps > tapsSent)
 };
 
 static Station knownStations[MAX_STATIONS];
@@ -192,6 +204,8 @@ static int findOrAddStation(const uint8_t *mac) {
     knownStations[idx].ackedRound = false;
     knownStations[idx].lastSeenMs = now;
     knownStations[idx].hasVer = false;
+    knownStations[idx].taps = 0;
+    knownStations[idx].tapsSent = 0;
     return idx;
 }
 
@@ -254,11 +268,60 @@ static void onDataRecv(const esp_now_recv_info_t *info, const uint8_t *data, int
             knownStations[idx].ver[1] = sp->ver_minor;
             knownStations[idx].ver[2] = sp->ver_rel;
         }
-        if (pendingActive && virusID == pendingPkt.virusID) {
+        // Tap-Pakete tragen den Zählerstand in virusID → nie als Effekt-Ack werten.
+        const bool isTap = sp && sp->mode == SYNC_MODE_TAP && len >= (int)sizeof(SyncPacket);
+        if (!isTap && pendingActive && virusID == pendingPkt.virusID) {
             knownStations[idx].ackedRound = true;
+        }
+        if (isTap) {
+            // Direkt gehört: Absender = Badge. Weitergeleitet (23 Byte): Ursprungs-MAC im Anhang.
+            // Nur Höchststand merken (max) → Wiederholungen/Weiterleitungen zählen nicht doppelt.
+            const bool fwd = len >= (int)TAP_FWD_PACKET_LEN;
+            int ti = idx;
+            if (fwd) {
+                const uint8_t *orig = data + sizeof(SyncPacket);
+                ti = -1;
+                for (int i = 0; i < knownStationsCount; i++) {
+                    if (memcmp(knownStations[i].mac, orig, 6) == 0) { ti = i; break; }
+                }
+                if (ti < 0) {
+                    ti = findOrAddStation(orig);
+                    // Nur über Dritte gehört: nicht als lebendige Station zeigen (kein RSSI)
+                    if (ti >= 0) knownStations[ti].lastSeenMs = millis() - STATION_STALE_MS - 1;
+                }
+            }
+            if (ti >= 0 && sp->virusID > knownStations[ti].taps) {
+                knownStations[ti].taps = sp->virusID;
+            }
         }
     }
     portEXIT_CRITICAL(&stationMux);
+}
+
+// Meldet höchstens ein neues Tap-Event pro Aufruf (loop-Task); Serial nie im WiFi-Callback.
+// Mehrere Taps zwischen zwei Aufrufen verschmelzen zum aktuellen Höchststand.
+static void emitTapEvent() {
+    uint8_t mac[6];
+    uint32_t count = 0;
+    portENTER_CRITICAL(&stationMux);
+    for (int i = 0; i < knownStationsCount; i++) {
+        if (knownStations[i].taps > knownStations[i].tapsSent) {
+            memcpy(mac, knownStations[i].mac, 6);
+            count = knownStations[i].taps;
+            knownStations[i].tapsSent = count;
+            break;
+        }
+    }
+    portEXIT_CRITICAL(&stationMux);
+    if (count == 0) return;
+    char macStr[18];
+    snprintf(macStr, sizeof(macStr), "%02X:%02X:%02X:%02X:%02X:%02X",
+             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    JsonDocument doc;
+    doc["evt"] = "tap";
+    doc["mac"] = macStr;
+    doc["count"] = count;
+    sendJson(doc);
 }
 
 static void sendPong() {
@@ -497,14 +560,18 @@ static void handleCommand(const char *json) {
             return;
         }
         uint8_t mode = doc["mode"] | 0;
-        // Stopp: ID der laufenden Welle aus dem JSON, sonst 0 (Wildcard), nie Zufalls-ID
-        uint32_t virusID = (mode == SYNC_MODE_WAVE_STOP)
+        // Stopp: ID der laufenden Welle aus dem JSON, sonst 0 (Wildcard), nie Zufalls-ID.
+        // „Alle stoppen“ ist global: virusID immer 0.
+        uint32_t virusID = (mode == SYNC_MODE_STOP_ALL)
+                               ? (uint32_t)0
+                           : (mode == SYNC_MODE_WAVE_STOP)
                                ? (doc["virusID"] | (uint32_t)0)
                                : (doc["virusID"] | (uint32_t)esp_random());
         uint32_t beatCounter = doc["beatCounter"] | (uint32_t)millis();
 
-        if ((mode < 1 || mode > 8) && mode != SYNC_MODE_WAVE_STOP) {
-            sendError("mode must be 1-8 or 10");
+        // 9 (Identify) und 11 (Tap, reiner Empfangsmodus) sind über "effect" nicht sendbar
+        if ((mode < 1 || mode > 8) && mode != SYNC_MODE_WAVE_STOP && mode != SYNC_MODE_STOP_ALL) {
+            sendError("mode must be 1-8, 10 or 12");
             return;
         }
 
@@ -621,6 +688,8 @@ void loop() {
             sendError("cmd too long");
         }
     }
+
+    emitTapEvent();
 
     // Verwaistes Update (App weg, Kabel gezogen) nach Timeout verwerfen
     if (otaActive && millis() - otaLastActivityMs > OTA_IDLE_TIMEOUT_MS) {

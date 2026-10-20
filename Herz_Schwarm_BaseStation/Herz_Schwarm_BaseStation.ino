@@ -59,14 +59,18 @@
 #define SYNC_MODE_AMBIENT    7   // Farbe als 0xRRGGBB im beatCounter
 #define SYNC_MODE_IDENTIFY   9   // "Badge finden": SyncPacket + 6 Byte Ziel-MAC
 #define SYNC_MODE_WAVE_STOP  10  // Welle manuell stoppen; ausserhalb von SYNC_MODE_MAX (Sonderfall)
+#define SYNC_MODE_TAP        11  // Tap-Counter (nur Empfang): virusID = Zählerstand; weitergeleitet + 6 Byte Ursprungs-MAC
+#define SYNC_MODE_STOP_ALL   12  // „Alle stoppen“: global (virusID 0), Badges leiten begrenzt weiter; Badge-FW >= 1.5
+#define TAP_FWD_PACKET_LEN   (sizeof(SyncPacket) + 6)
+#define TAP_PUBLISH_RETRY_MS 500 // Pause nach fehlgeschlagenem MQTT-Publish eines Tap-Events
 #define IDENTIFY_REPEATS     3   // Funk ist verlustbehaftet; Badge dedupliziert per virusID
 #define WAVE_STOP_REPEATS    3   // Stopp-Broadcast mehrfach senden (wie Identify)
 #define WAVE_STOP_GAP_MS     60
 #define HOSTNAME             "herz-base"
 
 #define BASESTATION_FW_MAJOR 0
-#define BASESTATION_FW_MINOR     3
-#define BASESTATION_FW_PATCH     1
+#define BASESTATION_FW_MINOR     4
+#define BASESTATION_FW_PATCH     0  // 0.4.0: Tap-Counter (Modus 11): /api/peers "taps" + MQTT-Event {"evt":"tap",…}; „Alle stoppen“ (Modus 12, Effekte laufen endlos)
 
 #define MQTT_NS "hs_mqtt"
 #define MQTT_HOST_DEF    "192.168.1.10"
@@ -97,6 +101,8 @@ struct PeerEntry {
     uint8_t  ver_dbg;
     uint8_t  ver_known;
     uint8_t  in_use;
+    uint32_t taps;      // höchster gesehener Tap-Zählerstand (0 = keiner); bleibt über das Peer-Timeout erhalten
+    uint32_t tapsSent;  // davon bereits per MQTT gemeldet
 };
 
 static PeerEntry peers[MAX_PEERS];
@@ -204,41 +210,60 @@ static int snapshotActivePeers(PeerEntry *out, uint32_t *nowOut) {
     return n;
 }
 
+// Findet den Slot zur MAC oder legt ihn an (freier Slot, sonst ein abgelaufener Slot, der nur
+// noch wegen taps > 0 gehalten wird). -1 = Tabelle voll. Aufruf unter peerMux.
+static int peerSlotLocked(const uint8_t *mac, uint32_t now, bool *isNew) {
+    int freeSlot = -1, staleSlot = -1;
+    for (int i = 0; i < MAX_PEERS; i++) {
+        if (!peers[i].in_use) {
+            if (freeSlot < 0) freeSlot = i;
+        } else if (memcmp(peers[i].mac, mac, 6) == 0) {
+            *isNew = false;
+            return i;
+        } else if (staleSlot < 0 && (now - peers[i].lastSeen) > PEER_TIMEOUT_MS) {
+            staleSlot = i;
+        }
+    }
+    int slot = (freeSlot >= 0) ? freeSlot : staleSlot;
+    if (slot < 0) return -1;
+    memset(&peers[slot], 0, sizeof(peers[slot]));
+    memcpy(peers[slot].mac, mac, 6);
+    peers[slot].lastSeen = now;
+    peers[slot].in_use = 1;
+    *isNew = true;
+    return slot;
+}
+
 static void updatePeer(const uint8_t *mac, int8_t rssi, bool hasVer,
                        uint8_t vmaj, uint8_t vmin, uint8_t vrel, uint8_t vdbg) {
     uint32_t now = millis();
+    bool isNew = false;
     portENTER_CRITICAL(&peerMux);
-    for (int i = 0; i < MAX_PEERS; i++) {
-        if (peers[i].in_use && memcmp(peers[i].mac, mac, 6) == 0) {
-            peers[i].lastSeen = now;
-            peers[i].rssi = rssi;
-            if (hasVer) {
-                peers[i].ver_major = vmaj;
-                peers[i].ver_minor = vmin;
-                peers[i].ver_rel = vrel;
-                peers[i].ver_dbg = vdbg;
-                peers[i].ver_known = 1;
-            }
-            portEXIT_CRITICAL(&peerMux);
-            return;
+    int i = peerSlotLocked(mac, now, &isNew);
+    if (i >= 0) {
+        peers[i].lastSeen = now;
+        peers[i].rssi = rssi;
+        if (hasVer) {
+            peers[i].ver_major = vmaj;
+            peers[i].ver_minor = vmin;
+            peers[i].ver_rel = vrel;
+            peers[i].ver_dbg = vdbg;
+            peers[i].ver_known = 1;
         }
     }
-    for (int i = 0; i < MAX_PEERS; i++) {
-        if (!peers[i].in_use) {
-            memcpy(peers[i].mac, mac, 6);
-            peers[i].lastSeen = now;
-            peers[i].rssi = rssi;
-            peers[i].ver_known = hasVer ? 1 : 0;
-            if (hasVer) {
-                peers[i].ver_major = vmaj;
-                peers[i].ver_minor = vmin;
-                peers[i].ver_rel = vrel;
-                peers[i].ver_dbg = vdbg;
-            }
-            peers[i].in_use = 1;
-            portEXIT_CRITICAL(&peerMux);
-            return;
-        }
+    portEXIT_CRITICAL(&peerMux);
+}
+
+// Tap-Stand einer MAC aufnehmen (nur Höchststand, Wiederholungen/Weiterleitungen zählen nicht
+// doppelt). Eine nur über Dritte gehörte MAC wird nicht als aktiver Peer gezeigt (kein RSSI).
+static void recordTap(const uint8_t *mac, uint32_t count) {
+    uint32_t now = millis();
+    bool isNew = false;
+    portENTER_CRITICAL(&peerMux);
+    int i = peerSlotLocked(mac, now, &isNew);
+    if (i >= 0) {
+        if (isNew) peers[i].lastSeen = now - PEER_TIMEOUT_MS - 1;
+        if (count > peers[i].taps) peers[i].taps = count;
     }
     portEXIT_CRITICAL(&peerMux);
 }
@@ -247,8 +272,8 @@ static void purgeStalePeers() {
     portENTER_CRITICAL(&peerMux);
     uint32_t now = millis();  // unter der Sperre: OnDataRecv kann lastSeen sonst "nach" now setzen
     for (int i = 0; i < MAX_PEERS; i++) {
-        if (peers[i].in_use && (now - peers[i].lastSeen) > PEER_TIMEOUT_MS) {
-            peers[i].in_use = 0;
+        if (peers[i].in_use && (now - peers[i].lastSeen) > PEER_TIMEOUT_MS && peers[i].taps == 0) {
+            peers[i].in_use = 0;  // Slots mit Tap-Stand bleiben (nur unsichtbar) → Dedup überlebt das Timeout
         }
     }
     portEXIT_CRITICAL(&peerMux);
@@ -265,6 +290,13 @@ void OnDataRecv(const esp_now_recv_info_t *recv_info, const uint8_t *data, int l
 
     int8_t rssi = recv_info->rx_ctrl->rssi;
     updatePeer(recv_info->src_addr, rssi, hasVer, rx.ver_major, rx.ver_minor, rx.ver_rel, rx.ver_dbg);
+
+    // Tap-Counter: direkt (17 Byte, MAC = Absender) oder weitergeleitet (23 Byte, Ursprungs-MAC im Anhang)
+    if (rx.mode == SYNC_MODE_TAP && hasVer) {
+        recordTap(len >= (int)TAP_FWD_PACKET_LEN ? data + sizeof(SyncPacket) : recv_info->src_addr,
+                  rx.virusID);
+        return;
+    }
 
     // Wellenzustand aus weitergeleiteten Badge-Paketen lernen (auch für Wellen aus Nerves)
     if (rx.mode == 4 && rx.virusID != waveStopId) {  // 4 = Welle
@@ -295,11 +327,11 @@ static uint32_t parseHexColor(const char *s) {
     return (uint32_t)v;
 }
 
-// POST /api/effect?m=1..8|10[&c=RRGGBB]  (c nur für m=7 Ambient, m=10 = Welle stoppen)
+// POST /api/effect?m=1..8|10|12[&c=RRGGBB]  (c nur für m=7 Ambient, m=10 = Welle stoppen, m=12 = Alle stoppen)
 static void handleEffect() {
     long m = server.arg("m").toInt();
-    if ((m < 1 || m > SYNC_MODE_MAX) && m != SYNC_MODE_WAVE_STOP) {
-        server.send(400, "text/plain", "m muss 1-8 oder 10 sein");
+    if ((m < 1 || m > SYNC_MODE_MAX) && m != SYNC_MODE_WAVE_STOP && m != SYNC_MODE_STOP_ALL) {
+        server.send(400, "text/plain", "m muss 1-8, 10 oder 12 sein");
         return;
     }
     uint32_t beat = (m == SYNC_MODE_AMBIENT) ? parseHexColor(server.arg("c").c_str()) : millis();
@@ -357,7 +389,7 @@ static void mqttBuildClientId(char *cid, size_t clen) {
 }
 
 // Payload: leer → Virus (kompatibel zu früher); "N" → Modus N (1..8);
-// "10" → Welle stoppen; "7:RRGGBB" → Ambient-Farbe.
+// "10" → Welle stoppen; "12" → Alle stoppen; "7:RRGGBB" → Ambient-Farbe.
 static void mqttCallback(char *topic, byte *payload, unsigned int len) {
     if (strcmp(topic, mqttCfg.topicCmd) != 0) return;
     char buf[16];
@@ -365,7 +397,7 @@ static void mqttCallback(char *topic, byte *payload, unsigned int len) {
     memcpy(buf, payload, n);
     buf[n] = '\0';
     long m = n ? strtol(buf, nullptr, 10) : 1;
-    if ((m < 1 || m > SYNC_MODE_MAX) && m != SYNC_MODE_WAVE_STOP) {
+    if ((m < 1 || m > SYNC_MODE_MAX) && m != SYNC_MODE_WAVE_STOP && m != SYNC_MODE_STOP_ALL) {
         Serial.printf("MQTT cmd ignoriert: \"%s\"\n", buf);
         return;
     }
@@ -555,7 +587,7 @@ footer code{background:#12121a;padding:.12rem .35rem;border-radius:6px;border:1p
 </div>
 <div class="card">
 <h2>&#x1F384; Eastereggs (ESP-NOW)</h2>
-<p style="margin:0 0 .75rem;color:var(--muted);font-size:.88rem">Gleiche Effekte wie am Badge: Morse-Virus, Singularity-Regenbogen (17+ Peers), Primzahl-Sparkles, Welle (RSSI-Ripple) &mdash; plus Beat, Zonen, Ambient-Farbe und Strobe. Modi 5&ndash;8 brauchen Badge-FW &ge; 1.1.</p>
+<p style="margin:0 0 .75rem;color:var(--muted);font-size:.88rem">Gleiche Effekte wie am Badge: Morse-Virus, Singularity-Regenbogen (17+ Peers), Primzahl-Sparkles, Welle (RSSI-Ripple) &mdash; plus Beat, Zonen, Ambient-Farbe und Strobe. Modi 5&ndash;8 brauchen Badge-FW &ge; 1.1. Effekte laufen, bis <b>Alle stoppen</b> (Badge-FW &ge; 1.5) sie beendet; der zuletzt gestartete Effekt gewinnt.</p>
 <div class="btn-row">
 <button type="button" class="btn" onclick="doEffect(1)">&#x26A1; Virus (wei&szlig;)</button>
 <button type="button" class="btn btn-rb" onclick="doEffect(2)">&#x1F308; Regenbogen</button>
@@ -567,6 +599,7 @@ footer code{background:#12121a;padding:.12rem .35rem;border-radius:6px;border:1p
 <button type="button" class="btn btn-zn" onclick="doEffect(6)">&#x1F3AF; Zonen</button>
 <span class="amb"><button type="button" class="btn btn-sec" onclick="doEffect(7)">&#x1F3A8; Ambient</button><input type="color" id="ambc" value="#ff2a88" title="Ambient-Farbe"></span>
 <button type="button" class="btn btn-st" onclick="doEffect(8)">&#x26A0;&#xFE0F; Strobe</button>
+<button type="button" class="btn btn-sec" onclick="doEffect(12)">&#x23F9; Alle stoppen</button>
 </div>
 <p class="warn">&#x26A0;&#xFE0F; Strobe blitzt ~6&times; pro Sekunde &mdash; nicht ausl&ouml;sen, wenn photosensible Menschen in der N&auml;he sind.</p>
 <p id="msg"></p>
@@ -612,7 +645,7 @@ footer code{background:#12121a;padding:.12rem .35rem;border-radius:6px;border:1p
 <p class="warn" id="otadef" style="display:none">&#x26A0;&#xFE0F; Standard-OTA-Passwort aktiv &mdash; eigenes in <code>ota_secret.h</code> setzen und neu flashen.</p>
 </div>
 <footer>
-&#x1F4CB; API: <code>GET /api/peers</code> &middot; <code>GET/POST /api/mqtt</code> &middot; <code>POST /api/effect?m=1&hellip;8[&amp;c=RRGGBB]</code> (<code>m=10</code> Welle stoppen) &middot; <code>POST /api/identify?mac=&hellip;</code> &middot; <code>POST /api/ota</code><br>
+&#x1F4CB; API: <code>GET /api/peers</code> &middot; <code>GET/POST /api/mqtt</code> &middot; <code>POST /api/effect?m=1&hellip;8[&amp;c=RRGGBB]</code> (<code>m=10</code> Welle stoppen, <code>m=12</code> Alle stoppen) &middot; <code>POST /api/identify?mac=&hellip;</code> &middot; <code>POST /api/ota</code><br>
 &#x2728; CCC Herz-Schwarm &mdash; HTTP ist unverschl&uuml;sselt; MQTT-Zugang nur im lokalen Netz setzen.
 </footer>
 </div>
@@ -707,7 +740,7 @@ async function doEffect(mode){
  if(mode===7)q+='&c='+encodeURIComponent(document.getElementById('ambc').value.slice(1));
  try{var r=await fetch('/api/effect?'+q,{method:'POST'});var t=await r.text();
   m.textContent=(r.ok?'\u2705 ':'\u274C ')+t;m.style.color=r.ok?'var(--cyan)':'#ff6b6b';
-  if(r.ok&&(mode===4||mode===10))setWave(mode===4);
+  if(r.ok&&(mode===4||mode===10||mode===12))setWave(mode===4);
  }catch(e){m.textContent='\u274C '+e;m.style.color='#ff6b6b';}
 }
 document.getElementById('mqttf').addEventListener('submit',async function(ev){
@@ -741,7 +774,7 @@ static void handleApiPeersTable() {
     static PeerEntry snap[MAX_PEERS];
     uint32_t now;
     int n = snapshotActivePeers(snap, &now);
-    char json[3072];
+    static char json[4096];  // static: Handler läuft nur im loop-Task; spart Stack (inkl. "taps" je Peer)
     size_t o = 0;
     o += snprintf(json + o, sizeof(json) - o,
                   "{\"station\":\"%u.%u.%u\",\"wave\":%s,\"ota_default\":%s,\"mqtt\":{\"enabled\":%s,\"connected\":%s},\"n\":%d,\"peers\":[",
@@ -761,18 +794,18 @@ static void handleApiPeersTable() {
         if (p.ver_known) {
             if (p.ver_dbg) {
                 o += snprintf(json + o, sizeof(json) - o,
-                              "\",\"rssi\":%d,\"fw\":\"%u.%u.%02u+\",\"age_ms\":%lu}",
+                              "\",\"rssi\":%d,\"fw\":\"%u.%u.%02u+\",\"age_ms\":%lu,\"taps\":%lu}",
                               p.rssi, p.ver_major, p.ver_minor, p.ver_dbg,
-                              (unsigned long)age);
+                              (unsigned long)age, (unsigned long)p.taps);
             } else {
                 o += snprintf(json + o, sizeof(json) - o,
-                              "\",\"rssi\":%d,\"fw\":\"%u.%u.%u\",\"age_ms\":%lu}",
+                              "\",\"rssi\":%d,\"fw\":\"%u.%u.%u\",\"age_ms\":%lu,\"taps\":%lu}",
                               p.rssi, p.ver_major, p.ver_minor, p.ver_rel,
-                              (unsigned long)age);
+                              (unsigned long)age, (unsigned long)p.taps);
             }
         } else {
-            o += snprintf(json + o, sizeof(json) - o, "\",\"rssi\":%d,\"fw\":null,\"age_ms\":%lu}",
-                          p.rssi, (unsigned long)age);
+            o += snprintf(json + o, sizeof(json) - o, "\",\"rssi\":%d,\"fw\":null,\"age_ms\":%lu,\"taps\":%lu}",
+                          p.rssi, (unsigned long)age, (unsigned long)p.taps);
         }
         if (o >= sizeof(json) - 64) break;
     }
@@ -870,10 +903,12 @@ static void handleOtaDone() {
 }
 
 static void sendEffectBroadcast(uint8_t mode, uint32_t beatCounter) {
-    if (mode != SYNC_MODE_WAVE_STOP && (mode < 1 || mode > SYNC_MODE_MAX)) mode = 1;
+    if (mode != SYNC_MODE_WAVE_STOP && mode != SYNC_MODE_STOP_ALL && (mode < 1 || mode > SYNC_MODE_MAX)) mode = 1;
     SyncPacket pkt = makeSyncPacket(mode, beatCounter);
     // Stopp trägt die ID der laufenden Welle (0 = unbekannt, Badges stoppen dann ihre lokale Welle)
     if (mode == SYNC_MODE_WAVE_STOP) pkt.virusID = lastWaveId;
+    // Alle stoppen ist global: keine ID (die Badges leiten es begrenzt weiter, einmal senden reicht)
+    if (mode == SYNC_MODE_STOP_ALL) pkt.virusID = 0;
     // Stopp-Welle 3× im Abstand; Badges leiten den Stopp selbst begrenzt weiter
     int repeats = (mode == SYNC_MODE_WAVE_STOP) ? WAVE_STOP_REPEATS : 1;
     bool ok = false;
@@ -893,6 +928,12 @@ static void sendEffectBroadcast(uint8_t mode, uint32_t beatCounter) {
         if (mode == SYNC_MODE_WAVE_STOP) {
             waveRunning = false;
             waveStopId = pkt.virusID;
+        }
+        // Alle stoppen oder ein anderer Effekt (letzter gewinnt, Badges räumen die Welle ab):
+        // UI-Zustand zurücksetzen und verspätete Pakete der alten Welle ausblenden
+        if (mode == SYNC_MODE_STOP_ALL || (mode != 4 && mode != 5 && mode != SYNC_MODE_WAVE_STOP)) {
+            if (waveRunning) waveStopId = lastWaveId;
+            waveRunning = false;
         }
     }
 }
@@ -950,6 +991,43 @@ void setup() {
     Serial.println("HTTP auf :80 (nach ETH-Got-IP erreichbar)");
 }
 
+// Neue Tap-Höchststände auf dem Status-Topic melden (loop-Task, nie im ESP-NOW-Callback).
+// Pro Aufruf höchstens ein Event; tapsSent erst nach erfolgreichem Publish → bei MQTT-Ausfall
+// geht nichts verloren (mehrere Stände einer MAC verschmelzen zum letzten).
+static void publishTapEvents(uint32_t now) {
+    static uint32_t retryAt = 0;
+    if (!mqttCfg.enabled || !mqtt.connected() || (int32_t)(now - retryAt) < 0) return;
+    uint8_t mac[6];
+    uint32_t count = 0;
+    portENTER_CRITICAL(&peerMux);
+    for (int i = 0; i < MAX_PEERS; i++) {
+        if (peers[i].in_use && peers[i].taps > peers[i].tapsSent) {
+            memcpy(mac, peers[i].mac, 6);
+            count = peers[i].taps;
+            break;
+        }
+    }
+    portEXIT_CRITICAL(&peerMux);
+    if (count == 0) return;
+    char json[80];
+    size_t o = 0;
+    o += snprintf(json + o, sizeof(json) - o, "{\"evt\":\"tap\",\"mac\":\"");
+    appendMac(json, sizeof(json), &o, mac);
+    o += snprintf(json + o, sizeof(json) - o, "\",\"count\":%lu}", (unsigned long)count);
+    if (!mqtt.publish(mqttCfg.topicStatus, json)) {
+        retryAt = now + TAP_PUBLISH_RETRY_MS;
+        return;
+    }
+    portENTER_CRITICAL(&peerMux);
+    for (int i = 0; i < MAX_PEERS; i++) {
+        if (peers[i].in_use && memcmp(peers[i].mac, mac, 6) == 0) {
+            if (count > peers[i].tapsSent) peers[i].tapsSent = count;
+            break;
+        }
+    }
+    portEXIT_CRITICAL(&peerMux);
+}
+
 void loop() {
     uint32_t now = millis();
     purgeStalePeers();
@@ -958,6 +1036,7 @@ void loop() {
     if (ethGotIp) {
         mqttTryConnect();
         mqtt.loop();
+        publishTapEvents(now);
         if (mqttCfg.enabled && now - lastMqttPublish >= 5000) {
             lastMqttPublish = now;
             mqttPublishStatus();
