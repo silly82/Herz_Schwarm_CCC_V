@@ -63,11 +63,11 @@ A swarm of 8x8 LED heart badges based on the **Waveshare ESP32-S3-Matrix**. They
 - **Serial debug on USB (ESP32-S3):** enable **USB CDC On Boot** (`CDCOnBoot=cdc`) and `ENABLE_SERIAL_DEBUG=1`. Because `upload` has no `--build-property`, use `--build-path build_debug` on compile and `--input-dir build_debug` on upload — see the **Arduino CLI** subsection under *Setup & Configuration* for copy-paste commands.
 - **Live log:** `arduino-cli monitor -p <port> -c baudrate=115200` in an **interactive** terminal; stop with `Ctrl+C` before flashing again.
 - **Batch flash (several devices):** `scripts/batch_flash_herz_schwarm.sh` needs **esptool** on `PATH` in addition to arduino-cli. See *Batch-Update* under *Setup & Configuration* (German) for options and the log files `firmware_update_log.csv` / `firmware_update_log.md`.
-- **Interactive TUI (currently v0.2.0):** running the same script in a terminal with `pyserial` installed auto-launches an ANSI menu (`scripts/flash_gui.py`) for port scanning, build mode (release/debug), compile, flash + MAC-read (parsed from upload output, no separate `esptool read_mac`), and log view. TUI covers **flash operations only** — effect control (modes 1–8, plus wave stop `10` and stop-all `12`) stays on the base station via Web-UI (port 80) or MQTT. macOS, Linux and (from v0.2.0) Windows; v0.2.0 also adds parallel flashing, retry of failed ports and automatic rebuild of a stale build.
+- **Interactive TUI (currently v0.2.1):** running the same script in a terminal with `pyserial` installed auto-launches an ANSI menu (`scripts/flash_gui.py`) for port scanning, build mode (release/debug), compile, flash + MAC-read (parsed from upload output, no separate `esptool read_mac`), and log view. TUI covers **flash operations only** — effect control (modes 1–8, plus wave stop `10` and stop-all `12`) stays on the base station via Web-UI (port 80) or MQTT. macOS, Linux and (from v0.2.0) Windows; v0.2.0 also adds parallel flashing, retry of failed ports and automatic rebuild of a stale build.
 - **Morse logging:** with debug on, each symbol prints as `[Morse]`; after 800 ms without a new symbol the word is evaluated (`-.-.` triggers the virus, otherwise `ignoriert`). With debug off, none of this is compiled into `loop()`.
 - **Firmware version:** see *Firmware-Version* (German section under *Setup & Configuration*): `FW_*` in `Herz_Schwarm_CCC_V.ino`; release `MAJOR.MINOR.PATCH`, debug `MAJOR.MINOR.DD+debug` with `DD` 01–99.
 - **ESP-NOW:** firmware version is sent in each sync packet (17-byte `SyncPacket`); legacy 13-byte peers still work — see *ESP-NOW Paket (Sync)* in the German section.
-- **Windows:** building and uploading with Arduino CLI works the same (ports are `COMx`); the TUI (`python scriptslash_gui.py`) supports Windows from v0.2.0, the Bash batch script is macOS/Linux only — see *Windows* below.
+- **Windows:** building and uploading with Arduino CLI works the same (ports are `COMx`); the TUI (`python scripts\flash_gui.py`) supports Windows from v0.2.0, the Bash batch script is macOS/Linux only — see *Windows* below.
 - **CI:** every push to `main` and every pull request compiles all three firmwares and runs `pytest` and `mix test` — see *Automatische Prüfung (CI)* below.
 
 ---
@@ -125,7 +125,7 @@ Kompilieren und Hochladen mit der Arduino CLI funktionieren unter Windows mit de
 
 - Der Port heißt `COMx` statt `/dev/cu.…` (`arduino-cli board list`).
 - In PowerShell mehrzeilige Befehle in eine Zeile schreiben oder mit dem Backtick statt `\` umbrechen.
-- Die TUI läuft ab v0.2.0 auch unter Windows: `python scriptslash_gui.py` (braucht `pip install pyserial`). `scripts/batch_flash_herz_schwarm.sh` und `scripts/version.sh` sind Bash-Skripte für macOS/Linux; in Git Bash laufen sie, die Port-Erkennung des Bash-Modus kennt `COMx` aber nicht.
+- Die TUI läuft ab v0.2.0 auch unter Windows: `python scripts\flash_gui.py` (braucht `pip install pyserial`). `scripts/batch_flash_herz_schwarm.sh` und `scripts/version.sh` sind Bash-Skripte für macOS/Linux; in Git Bash laufen sie, die Port-Erkennung des Bash-Modus kennt `COMx` aber nicht.
 - Die App (`herz_schwarm_nerves/`) braucht Elixir; ohne lokale Installation prüft die CI die Tests.
 
 ### Automatische Prüfung (CI)
@@ -173,7 +173,7 @@ chmod +x scripts/batch_flash_herz_schwarm.sh
 
 Vor dem Lauf: **seriellen Monitor beenden** (`Ctrl+C`), sonst ist der Port belegt. Pro Gerät: zuerst Flash, danach MAC auslesen; Ergebnis `ok` / `upload_failed` / `ok_mac_unread` u. a. steht in der CSV/MD. Ausdrücklich mit **`bash ./scripts/...`** starten, falls die System-Shell zickt.
 
-### CLI Pseudo-GUI (interaktiv, aktuell v0.2.0)
+### CLI Pseudo-GUI (interaktiv, aktuell v0.2.1)
 
 `scripts/batch_flash_herz_schwarm.sh` startet **automatisch** eine interaktive TUI, wenn ein TTY erkannt wird und `pyserial` installiert ist. Die TUI (`scripts/flash_gui.py`) ist ein dünner Wrapper um die gleiche Logik — nutzt aber ANSI-Boxen für Menü, Live-Output und Multi-Select.
 
@@ -223,6 +223,8 @@ Vor dem Flashen baut die TUI von selbst neu, wenn kein Build da ist, der Build-M
 - **Rahmen stimmen** — die Breite wird ohne Farbcodes berechnet und passt sich Inhalt und Terminal an
 - **Log** immer UTF-8 mit Zeitzone im Zeitstempel (vorher fehlte sie in der TUI)
 - **41 Unit-Tests** in `flashlib/` (laufen in der CI)
+
+**Änderungen v0.2.1:** Im Kopf der TUI erscheint das Badge-Herz als Blockgrafik (ab 72 Spalten Fensterbreite; in schmaleren Fenstern entfällt es). 43 Unit-Tests.
 
 **Änderungen v0.1.0 → v0.1.1 (Punkt-Release):**
 - **MAC aus Upload-Output geparst** statt separates `esptool read_mac` — kein Bootloader-Reset-Race mehr, ~3s pro Board gespart
@@ -354,7 +356,7 @@ Das A.B.C.D-Schema oben beschreibt **nur die Badge-Firmware** (`Herz_Schwarm_CCC
 | Basisstation | `Herz_Schwarm_BaseStation/Herz_Schwarm_BaseStation.ino` | `BASESTATION_FW_MAJOR/MINOR/PATCH` | 0.4.2 |
 | Bridge (Nerves-Adapter) | `herz_schwarm_nerves/firmware/esp32_bridge/esp32_bridge.ino` | `BRIDGE_FW_MAJOR/MINOR/PATCH` | 0.5.0 |
 | Nerves/Phoenix-App | `herz_schwarm_nerves/mix.exs` | `@version` | 0.3.0 |
-| Flash-Tooling (Python) | `scripts/flashlib/__init__.py` | `__version__` | 0.2.0 |
+| Flash-Tooling (Python) | `scripts/flashlib/__init__.py` | `__version__` | 0.2.1 |
 
 Jedes Modul wird unabhängig gebaut, geflasht bzw. deployed — eine einzige globale Versionsnummer für alles ist bewusst nicht das Ziel. `scripts/version.sh all` zeigt den aktuellen Stand aller fünf; `scripts/version.sh tag` schreibt sie als Snapshot in die Tag-Message des `vA.B.C.D`-Releases (D bleibt reiner Git-Commit-Zähler seit dem letzten `vA.B.C`-Tag, repo-weit — nicht auf Badge-Änderungen beschränkt).
 

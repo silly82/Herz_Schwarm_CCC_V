@@ -57,6 +57,20 @@ def test_box_cuts_overlong_lines():
     assert "…" in out
 
 
+def test_half_blocks_and_beside():
+    assert term.half_blocks(["X.", "XX", ".X"]) == ["█▄", " ▀"]
+    assert term.beside(["ab", "c"], ["1", "2", "3"]) == ["ab  1", "c   2", "    3"]
+
+
+def test_header_shows_heart_only_in_wide_terminals():
+    state = {"ports": [], "debug": False, "parallel": False, "failed": []}
+    wide = flash_gui.header_lines(state, width=100)
+    narrow = flash_gui.header_lines(state, width=60)
+    assert wide[0].startswith("▄██▄▄██▄") and "Firmware" in wide[0]
+    assert narrow[0].startswith("Firmware")
+    assert len(wide) == len(narrow)
+
+
 # --- ports ---
 
 def test_ports_sort_naturally():

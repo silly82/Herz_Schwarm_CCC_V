@@ -71,6 +71,30 @@ def _enable_windows_vt() -> bool:
         return False
 
 
+def half_blocks(rows: List[str]) -> List[str]:
+    """Pixel art from rows of 'X'/'.': two pixel rows per text line (▀ ▄ █), so pixels look square."""
+    rows = list(rows) + ["" for _ in range(len(rows) % 2)]
+    width = max((len(r) for r in rows), default=0)
+    out = []
+    for top, bottom in zip(rows[0::2], rows[1::2]):
+        line = ""
+        for x in range(width):
+            upper = x < len(top) and top[x] != "."
+            lower = x < len(bottom) and bottom[x] != "."
+            line += "█" if upper and lower else "▀" if upper else "▄" if lower else " "
+        out.append(line)
+    return out
+
+
+def beside(left: List[str], right: List[str], gap: int = 2) -> List[str]:
+    """Put two blocks of lines next to each other (left block padded to equal width)."""
+    width = max((visible_len(l) for l in left), default=0)
+    height = max(len(left), len(right))
+    left = left + [""] * (height - len(left))
+    right = right + [""] * (height - len(right))
+    return [(pad(l, width) + " " * gap + r).rstrip() for l, r in zip(left, right)]
+
+
 def box(title: str, lines: List[str], paint=None, min_width: int = 60, max_width: int = 0) -> str:
     """Render a box. `paint(text)` colours the frame; content may carry its own colours.
 

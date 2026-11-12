@@ -1,6 +1,6 @@
 # Todo / Notizen (Projekt Herz-Schwarm)
 
-Stand: 2026-11-12 — Badge 1.8.0, Basisstation 0.4.2, Bridge 0.5.0, Nerves-App 0.3.0, Flash-Tooling 0.2.0 (Versionen aller Module: README → *Versionen aller Module*).
+Stand: 2026-11-12 — Badge 1.8.0, Basisstation 0.4.2, Bridge 0.5.0, Nerves-App 0.3.0, Flash-Tooling 0.2.1 (Versionen aller Module: README → *Versionen aller Module*).
 
 Geflasht und am Gerät geprüft ist bisher nur der Stand bis Badge 1.5.0 (2 von 12 Badges), Basisstation 0.4.0
 und Bridge 0.4.0. Alles danach (Badge 1.5.1–1.8.0, Basisstation/Bridge 0.4.1–0.5.0) ist kompiliert und läuft
@@ -68,7 +68,7 @@ durch die CI, die App 0.2.1–0.3.0 ist durch `mix test` in der CI geprüft.
 - **Morse-Easter-Eggs:** bisher nur `-.-.` (Virus). Ideen: `...` → Regenbogen, `.-..` → Welle.
 - **Git-Tag setzen:** letzter Tag ist `v1.4.0.0`; 1.4.1 bis 1.8.0 sind ungetaggt (`scripts/version.sh tag`,
   sinnvoll nach dem Test am Gerät).
-- **Flash-TUI 0.2.0 mit Badges testen:** unter Windows (`COMx`) und macOS je einmal flashen; dabei „gleichzeitig
+- **Flash-TUI 0.2.1 mit Badges testen:** unter Windows (`COMx`) und macOS je einmal flashen; dabei „gleichzeitig
   flashen“ (Taste `6`) mit 3–4 Boards an einem Hub prüfen. Bisher nur Tests, Menü und Kompilieren geprüft.
 - **Alte Branches aufräumen:** `Debug`, `copilot/*`, `feat/pi-flash-station` (prüfen, ob noch gebraucht).
 - **Ideen (nicht begonnen):** Schwarm-Simulator für Tests ohne Hardware; gemeinsame Header-Datei für das

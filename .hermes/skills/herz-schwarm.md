@@ -20,7 +20,7 @@ Badge-Firmware, Basisstation (ESP32-S3 + W5500), Nerves-Controller
 (Elixir/Phoenix) mit USB-Bridge, TUI-Flasher (Python).
 
 Stand 2026-11-12: Badge 1.8.0, Basisstation 0.4.2, Bridge 0.5.0, App 0.3.0,
-Flash-Tooling 0.2.0. Maßgeblich sind `README.md` (Funktionen, Protokoll,
+Flash-Tooling 0.2.1. Maßgeblich sind `README.md` (Funktionen, Protokoll,
 Versionen) und `todo.md` (offene Punkte, Tests am Gerät). Badge 1.5.1–1.8.0
 sind kompiliert und in der CI geprüft, aber noch nicht am Gerät getestet.
 
@@ -94,7 +94,7 @@ als Snapshot (`scripts/version.sh all`), nicht nur A.B.C der Badge-FW.
 | Basisstation | `Herz_Schwarm_BaseStation/Herz_Schwarm_BaseStation.ino` | `BASESTATION_FW_MAJOR/MINOR/PATCH` | eigener Zähler |
 | Bridge | `herz_schwarm_nerves/firmware/esp32_bridge/esp32_bridge.ino` | `BRIDGE_FW_MAJOR/MINOR/PATCH` | eigener Zähler |
 | Nerves-App | `herz_schwarm_nerves/mix.exs` | `@version` | eigener Zähler |
-| Flash-Tooling | `scripts/flashlib/__init__.py` | `__version__` | eigener Zähler (aktuell 0.2.0) |
+| Flash-Tooling | `scripts/flashlib/__init__.py` | `__version__` | eigener Zähler (aktuell 0.2.1) |
 
 Jedes Modul wird unabhängig gebaut/geflasht/deployed und hat einen eigenen
 Release-Rhythmus — eine einzelne globale Versionsnummer für alles ist bewusst

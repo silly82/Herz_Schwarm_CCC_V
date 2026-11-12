@@ -288,7 +288,7 @@ ioreg -p IOUSB -l | grep -i "usb serial\|usb-serial"
 ## Wichtige Constraints
 
 - **macOS first** (GallifreyM1), Linux secondary (x86_64)
-- **Windows**: TUI-Flasher ab flashlib v0.2.0 (`python scriptslash_gui.py`); das Bash-Skript bleibt macOS/Linux
+- **Windows**: TUI-Flasher ab flashlib v0.2.0 (`python scripts\flash_gui.py`); das Bash-Skript bleibt macOS/Linux
 - **Effekt-Steuerung läuft NUR über diese Web-UI** (oder Basisstation), nie im TUI-Flasher
 - **Version**: `Herz_Schwarm_CCC_V.ino` Defines sind nur für die Badge-FW + den `vA.B.C.D`-Git-Tag maßgeblich. Basisstation/Bridge/Nerves-App/flashlib versionieren sich unabhängig — vollständige Tabelle in `../README.md` (Abschnitt "Versionen aller Module")
 - **Logs append-only**: `firmware_update_log.csv`/`.md` werden nie überschrieben

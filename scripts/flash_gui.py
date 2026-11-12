@@ -48,6 +48,19 @@ LOG_MD = REPO_ROOT / "firmware_update_log.md"
 # Mehr gleichzeitige Uploads bringen an einem USB-Hub nichts mehr.
 MAX_PARALLEL = 8
 
+# Herz wie auf der 8x8-Matrix der Badges; erscheint im Kopf der TUI.
+HEART_PIXELS = [
+    ".XX..XX.",
+    "XXXXXXXX",
+    "XXXXXXXX",
+    "XXXXXXXX",
+    ".XXXXXX.",
+    "..XXXX..",
+    "...XX...",
+    "........",
+]
+HEART_MIN_WIDTH = 72
+
 # (Port, Ergebnis wie im Log, MAC oder "")
 FlashResult = Tuple[str, str, str]
 
@@ -120,13 +133,23 @@ def status_lines(state: dict) -> List[str]:
     return lines
 
 
+def heart_lines() -> List[str]:
+    """Das Badge-Herz als Blockgrafik (8x8 Pixel auf 4 Textzeilen)."""
+    return [C_RED(line) for line in term.half_blocks(HEART_PIXELS)]
+
+
+def header_lines(state: dict, width: Optional[int] = None) -> List[str]:
+    lines = status_lines(state) + [C_GREY("Nur Flashen — Effekte über Basisstation oder App")]
+    width = term.terminal_width() if width is None else width
+    # In schmalen Fenstern würde das Herz den Status aus dem Rahmen drängen.
+    if width < HEART_MIN_WIDTH:
+        return lines
+    return term.beside(heart_lines(), lines)
+
+
 def header(state: dict) -> None:
     clear_screen()
-    print(box(
-        f"Herz-Schwarm Batch-Flasher v{FLASHLIB_VERSION}",
-        status_lines(state) + [C_GREY("Nur Flashen — Effekte über Basisstation oder App")],
-        paint=C_PINK,
-    ))
+    print(box(f"Herz-Schwarm Batch-Flasher v{FLASHLIB_VERSION}", header_lines(state), paint=C_PINK))
     print()
 
 
