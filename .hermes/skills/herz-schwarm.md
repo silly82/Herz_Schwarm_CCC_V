@@ -49,12 +49,11 @@ arduino-cli compile Herz_Schwarm_BaseStation
 arduino-cli compile herz_schwarm_nerves/firmware/esp32_bridge
 ```
 
-## CI
+## Prüfen (keine CI)
 
-`.github/workflows/ci.yml` läuft bei Push auf `main`, Pull Requests und per
-`gh workflow run ci.yml --ref <branch>`: kompiliert Badge (Release, Debug, mit
-Funk-Update), Basisstation, Bridge; `pytest` für `scripts/`; `mix test` für die
-App. Versionen von ESP32-Core und Libraries sind dort festgenagelt.
+Das Projekt hat bewusst keine CI. Vor einem Push von Hand: Badge, Basisstation
+und Bridge mit `arduino-cli compile` bauen, `python -m pytest scripts`, und
+`mix test` in `herz_schwarm_nerves/` (braucht Elixir).
 
 ## Geheimnisse (nie committen)
 

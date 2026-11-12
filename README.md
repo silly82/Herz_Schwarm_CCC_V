@@ -68,7 +68,7 @@ A swarm of 8x8 LED heart badges based on the **Waveshare ESP32-S3-Matrix**. They
 - **Firmware version:** see *Firmware-Version* (German section under *Setup & Configuration*): `FW_*` in `Herz_Schwarm_CCC_V.ino`; release `MAJOR.MINOR.PATCH`, debug `MAJOR.MINOR.DD+debug` with `DD` 01–99.
 - **ESP-NOW:** firmware version is sent in each sync packet (17-byte `SyncPacket`); legacy 13-byte peers still work — see *ESP-NOW Paket (Sync)* in the German section.
 - **Windows:** building and uploading with Arduino CLI works the same (ports are `COMx`); the TUI (`python scripts\flash_gui.py`) supports Windows from v0.2.0, the Bash batch script is macOS/Linux only — see *Windows* below.
-- **CI:** every push to `main` and every pull request compiles all three firmwares and runs `pytest` and `mix test` — see *Automatische Prüfung (CI)* below.
+- **Checks:** there is no CI; compile the firmwares and run `pytest` / `mix test` locally before pushing — see *Prüfen vor dem Push* below.
 
 ---
 
@@ -78,7 +78,7 @@ A swarm of 8x8 LED heart badges based on the **Waveshare ESP32-S3-Matrix**. They
 - **USB Mode:** "Hardware CDC and JTAG"
 - **USB CDC On Boot:** *Enabled* if you want `Serial` output on the USB cable while debugging (matches `CDCOnBoot=cdc` in CLI).
 - **Library:** FastLED (v3.6+); WiFi, ESP-NOW, Wire, Update und HTTPClient kommen mit dem ESP32-Core. Basisstation zusätzlich PubSubClient, Bridge zusätzlich ArduinoJson 7.
-- **Geprüfter Stand (CI):** ESP32-Core 3.3.12, FastLED 3.10.9, PubSubClient 2.8.0, ArduinoJson 7.4.3 — in `.github/workflows/ci.yml` festgenagelt.
+- **Geprüfter Stand:** ESP32-Core 3.3.12, FastLED 3.10.9, PubSubClient 2.8.0, ArduinoJson 7.4.3.
 
 ### Arduino CLI
 Build und Upload lassen sich mit der **Arduino CLI** erledigen. **FQBN:** `esp32:esp32:esp32s3`. **Sketch-Verzeichnis:** Wurzel dieses Repos (Datei `Herz_Schwarm_CCC_V.ino`). Im Ordner `.cursor/rules/` liegt eine **Cursor-Regel** (`arduino-cli.mdc`) mit typischen Befehlen.
@@ -126,19 +126,19 @@ Kompilieren und Hochladen mit der Arduino CLI funktionieren unter Windows mit de
 - Der Port heißt `COMx` statt `/dev/cu.…` (`arduino-cli board list`).
 - In PowerShell mehrzeilige Befehle in eine Zeile schreiben oder mit dem Backtick statt `\` umbrechen.
 - Die TUI läuft ab v0.2.0 auch unter Windows: `python scripts\flash_gui.py` (braucht `pip install pyserial`). `scripts/batch_flash_herz_schwarm.sh` und `scripts/version.sh` sind Bash-Skripte für macOS/Linux; in Git Bash laufen sie, die Port-Erkennung des Bash-Modus kennt `COMx` aber nicht.
-- Die App (`herz_schwarm_nerves/`) braucht Elixir; ohne lokale Installation prüft die CI die Tests.
+- Die App (`herz_schwarm_nerves/`) braucht Elixir; ohne lokale Installation lassen sich ihre Tests nur auf dem Mac oder dem Pi ausführen.
 
-### Automatische Prüfung (CI)
+### Prüfen vor dem Push
 
-`.github/workflows/ci.yml` läuft bei jedem Push auf `main`, bei jedem Pull Request und auf Knopfdruck (`gh workflow run ci.yml --ref <branch>`):
+Das Projekt hat bewusst **keine CI**. Vor einem Push von Hand prüfen:
 
-| Job | Inhalt |
+| Was | Befehl |
 |-----|--------|
-| `firmware` | kompiliert Badge (Release, Debug und mit Funk-Update über die Vorlage `ota_secret.h.example`), Basisstation und Bridge; legt Badge- und Bridge-`.bin` als Artefakt ab |
-| `flash-tooling` | `pytest` für `scripts/flashlib` (41 Tests) |
-| `app` | `mix test` für `herz_schwarm_nerves` (Elixir/OTP aus `.tool-versions`) |
+| Firmware | Badge, Basisstation und Bridge mit `arduino-cli compile` bauen (Befehle oben) |
+| Flash-Tooling | `python -m pytest scripts` (43 Tests) |
+| App | `mix test` in `herz_schwarm_nerves/` (braucht Elixir) |
 
-Geflasht wird dabei nichts — Funk- und LED-Verhalten bleiben ein Test am Gerät. Die Badge-`.bin` aus der CI ist ohne eigene `ota_secret.h` gebaut und deshalb **keine** Datei für das Funk-Update.
+Funk- und LED-Verhalten bleiben ein Test am Gerät.
 
 ### Betrieb auf dem Raspberry Pi
 Die Phoenix-App läuft aktuell **ohne Nerves-Firmware** direkt auf **Raspberry Pi OS (Debian 13, aarch64)** als systemd-Dienst `herz-schwarm` auf Port **4000** — kein Nerves-Build, kein `mix release`. Zusätzlich stellt die App die Diagnose-Seite **`/diagnose`** bereit (Monitoring: Zähler, Bridge-Zustand, Log-Panel, Badge-Metriken). Setup-Details (Autostart, Log, Updates) stehen in `herz_schwarm_nerves/MAC_SETUP.md`; hier bewusst nur der Verweis, keine doppelte Anleitung.
@@ -222,7 +222,7 @@ Vor dem Flashen baut die TUI von selbst neu, wenn kein Build da ist, der Build-M
 - **Gleichzeitig flashen** (Taste `6`) für mehrere Boards an einem Hub; **erneut flashen** nur der fehlgeschlagenen Ports (Taste `r`); Ergebnisübersicht am Ende
 - **Rahmen stimmen** — die Breite wird ohne Farbcodes berechnet und passt sich Inhalt und Terminal an
 - **Log** immer UTF-8 mit Zeitzone im Zeitstempel (vorher fehlte sie in der TUI)
-- **41 Unit-Tests** in `flashlib/` (laufen in der CI)
+- **41 Unit-Tests** in `flashlib/`
 
 **Änderungen v0.2.1:** Im Kopf der TUI erscheint das Badge-Herz als Blockgrafik (ab 72 Spalten Fensterbreite; in schmaleren Fenstern entfällt es). 43 Unit-Tests.
 
@@ -259,7 +259,7 @@ Badges holen sich eine neue Firmware selbst per WLAN, ausgelöst über den Schwa
 
 **Was die Badges tun:** Jedes Badge prüft den Auslöser (Modus `13`, HMAC-SHA256 mit `OTA_KEY`), leitet ihn begrenzt weiter (3×) und aktualisiert sich nur, wenn die Zielversion **neuer** ist als die eigene. Nach einer zufälligen Wartezeit (0,5–6,5 s, damit nicht alle gleichzeitig laden) verlässt es den Schwarm-Funk, meldet sich am WLAN an, lädt `http://<Adresse>:<Port>/firmware/badge.bin`, prüft Größe und MD5 und startet neu. Anzeige: **blau blinkend** = sucht WLAN, **blau füllend** = lädt, **grün** = fertig, **rot** = fehlgeschlagen. Auch nach einem Fehler startet das Badge neu und läuft mit der alten Firmware weiter; denselben Auslöser versucht es nicht noch einmal, erst einen neuen.
 
-**Grenzen:** Eine Firmware, die ohne `ota_secret.h` gebaut wurde, lässt sich per Funk einspielen, kann danach aber selbst kein Funk-Update mehr (dann wieder USB). Die Binärdatei aus der CI ist deshalb keine Update-Datei. Gleiche oder ältere Versionen werden abgelehnt — zum Testen die Version erhöhen. Die Basisstation kann das Update nicht auslösen, nur App + Bridge. Wer einen echten Auslöser mitschneidet, kann ihn erneut senden: Badges mit älterer Version versuchen dann das Update, scheitern ohne erreichbaren Server und sind dafür etwa 25 s aus dem Schwarm — eine fremde Firmware lässt sich so nicht einspielen (MD5 im signierten Auslöser).
+**Grenzen:** Eine Firmware, die ohne `ota_secret.h` gebaut wurde, lässt sich per Funk einspielen, kann danach aber selbst kein Funk-Update mehr (dann wieder USB). Gleiche oder ältere Versionen werden abgelehnt — zum Testen die Version erhöhen. Die Basisstation kann das Update nicht auslösen, nur App + Bridge. Wer einen echten Auslöser mitschneidet, kann ihn erneut senden: Badges mit älterer Version versuchen dann das Update, scheitern ohne erreichbaren Server und sind dafür etwa 25 s aus dem Schwarm — eine fremde Firmware lässt sich so nicht einspielen (MD5 im signierten Auslöser).
 
 ### Bewegungssensor (ab Badge 1.8.0)
 
@@ -396,7 +396,7 @@ Kompaktes `SyncPacket` (packed): `magic_id`, `beatCounter`, `virusID`, `mode` wi
 12b. **Funk-Update der Badges (ab Badge 1.7.0 / Bridge 0.5.0 / App 0.3.0):** Seite **`/badge-update`** (Modul `HerzSchwarm.BadgeOta`): legt die Badge-`.bin` ab (Verzeichnis aus Config `:badge_ota_dir`, Standard `~/.local/share/herz-schwarm`), liefert sie unter `GET /firmware/badge.bin` aus und baut das signierte 54-Byte-Auslösepaket (Schlüssel aus der Umgebungsvariable `BADGE_OTA_KEY`). An die Bridge geht es als `{"cmd":"badge_ota","pkt":"<Base64, 54 Byte>"}`; die Bridge prüft Länge, Magic und Modus und sendet es 3×. Ablauf und Grenzen: Abschnitt *Funk-Update der Badges*. Am Gerät noch nicht getestet.
 **Sicherheitshinweis (`/bridge-update`):** Die Update-Seite hat **keinen Login** — jeder, der die App im Netz erreicht, kann eine Bridge-Firmware hochladen und flashen. Die App nur in einem vertrauenswürdigen Netz betreiben oder den Zugriff auf Netzwerkebene beschränken (Firewall/VPN/LAN-Segment); ein Login gibt es bewusst noch nicht — im Gegensatz zur OTA der Basisstation (Punkt 9), die HTTP Basic Auth nutzt.
 13. **Cursor / Arduino CLI:** Zusätzliche Befehle in `.cursor/rules/arduino-cli.mdc`.
-14. **Automatische Prüfung:** `.github/workflows/ci.yml` — siehe Abschnitt *Automatische Prüfung (CI)*.
+14. **Prüfung:** keine CI — Kompilieren und Tests laufen von Hand, siehe Abschnitt *Prüfen vor dem Push*.
 15. **Offene Punkte und Tests am Gerät:** `todo.md`.
 16. **Eigene Badge-Hardware:** `herz_badge/` (KiCad, Akku-Version; Stand in `herz_badge/README.md`).
 

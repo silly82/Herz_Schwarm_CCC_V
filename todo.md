@@ -3,8 +3,8 @@
 Stand: 2026-11-12 — Badge 1.8.0, Basisstation 0.4.2, Bridge 0.5.0, Nerves-App 0.3.0, Flash-Tooling 0.2.1 (Versionen aller Module: README → *Versionen aller Module*).
 
 Geflasht und am Gerät geprüft ist bisher nur der Stand bis Badge 1.5.0 (2 von 12 Badges), Basisstation 0.4.0
-und Bridge 0.4.0. Alles danach (Badge 1.5.1–1.8.0, Basisstation/Bridge 0.4.1–0.5.0) ist kompiliert und läuft
-durch die CI, die App 0.2.1–0.3.0 ist durch `mix test` in der CI geprüft.
+und Bridge 0.4.0. Alles danach (Badge 1.5.1–1.8.0, Basisstation/Bridge 0.4.1–0.5.0) ist kompiliert, die
+App 0.2.1–0.3.0 durch `mix test` geprüft (bis 2026-11-12 in der CI; die CI ist seitdem entfernt).
 
 ## Offen
 
@@ -82,7 +82,6 @@ durch die CI, die App 0.2.1–0.3.0 ist durch `mix test` in der CI geprüft.
 
 - Bewegungssensor: Schütteln → Herzflattern, „Herz immer aufrecht“ und Abdunkeln in Ruhe als Optionen (1.8.0) — Gerätetest offen.
 - Funk-Update der Badges über WLAN, Seite `/badge-update` (Badge 1.7.0, Bridge 0.5.0, App 0.3.0) — Gerätetest offen.
-- CI: alle Firmwares kompilieren, `pytest` und `mix test` bei jedem Push/PR (`.github/workflows/ci.yml`).
 - Badge 1.6.0: Nähe steuert nur die Helligkeit (nächstes Badge), Tempo je Modus fest, ferngesteuerte Effekte mit
   fester Helligkeit, Morse-Virus endet nach 3 s, „Alle stoppen“ mit Kennung (Basis/Bridge 0.4.2, App 0.2.2) — Gerätetest offen.
 - Badge 1.5.1: echtes 50-Hz-/20-Hz-Raster, Stationen zählen nicht als Peer, Regenbogen synchron; App 0.2.1:
@@ -120,7 +119,7 @@ durch die CI, die App 0.2.1–0.3.0 ist durch `mix test` in der CI geprüft.
 - Badge-Funk-Update: `ota_secret.h` im Repo-Root (Vorlage `ota_secret.h.example`, gitignored); Update-Datei mit
   `--build-path build_ota` bauen (gitignored, enthält die Geheimnisse).
 - Debug-Build Badge: `--board-options CDCOnBoot=cdc --build-property "compiler.cpp.extra_flags=-DENABLE_SERIAL_DEBUG=1" --build-path build_debug`.
-- App-Tests: `mix test` in `herz_schwarm_nerves/`; Flash-Tooling: `python -m pytest` in `scripts/`. Beides läuft in der CI.
+- App-Tests: `mix test` in `herz_schwarm_nerves/`; Flash-Tooling: `python -m pytest` in `scripts/`. Beides von Hand vor dem Push (keine CI).
 - **Nummerierte Gesamt-Doku:** `README.md` → Abschnitt *Projekt-Dokumentation (nummeriert)*.
 
 ## Hardware (Referenz)

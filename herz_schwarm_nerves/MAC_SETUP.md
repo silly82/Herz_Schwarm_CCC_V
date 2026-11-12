@@ -20,7 +20,7 @@ cd herz_schwarm_nerves
 asdf install          # nimmt die Versionen aus .tool-versions (Elixir 1.15.4 / OTP 26.2)
 ```
 
-Das Projekt verlangt Elixir `~> 1.15`; neuere Versionen gehen ebenfalls (auf dem Pi laufen Elixir 1.18 / OTP 27). Die CI testet mit den Versionen aus `.tool-versions`.
+Das Projekt verlangt Elixir `~> 1.15`; neuere Versionen gehen ebenfalls (auf dem Pi laufen Elixir 1.18 / OTP 27). `.tool-versions` nennt die Versionen, mit denen entwickelt wurde.
 
 Prüfen:
 ```bash
@@ -581,7 +581,7 @@ EffectEngine.set_bpm(120)
 EffectEngine.stop_all()
 ```
 
-Automatische Tests: `mix test` (läuft ohne Bridge und ohne Hardware; in der CI bei jedem Push und Pull Request).
+Automatische Tests: `mix test` (läuft ohne Bridge und ohne Hardware; von Hand vor dem Push, es gibt keine CI).
 
 ## Was NICHT funktioniert auf Mac
 
