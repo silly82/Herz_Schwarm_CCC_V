@@ -213,6 +213,25 @@ Badges holen sich eine neue Firmware selbst per WLAN, ausgelöst über den Schwa
 
 **Grenzen:** Eine Firmware, die ohne `ota_secret.h` gebaut wurde, lässt sich per Funk einspielen, kann danach aber selbst kein Funk-Update mehr (dann wieder USB). Die Binärdatei aus der CI ist deshalb keine Update-Datei. Gleiche oder ältere Versionen werden abgelehnt — zum Testen die Version erhöhen. Die Basisstation kann das Update nicht auslösen, nur App + Bridge. Wer einen echten Auslöser mitschneidet, kann ihn erneut senden: Badges mit älterer Version versuchen dann das Update, scheitern ohne erreichbaren Server und sind dafür etwa 25 s aus dem Schwarm — eine fremde Firmware lässt sich so nicht einspielen (MD5 im signierten Auslöser).
 
+### Bewegungssensor (ab Badge 1.8.0)
+
+Die Waveshare ESP32-S3-Matrix hat einen Beschleunigungssensor (QMI8658, I²C: SDA GPIO 11, SCL GPIO 12, Adresse `0x6B`). Die Firmware liest ihn 25-mal pro Sekunde. **Stand: kompiliert, am Gerät noch nicht getestet.** Antwortet beim Start kein passender Sensor oder meldet er in Ruhe nicht etwa 1 g, bleibt alles aus und das Badge läuft wie bisher. Ganz abschalten: `-DENABLE_IMU=0`.
+
+| Funktion | Standard | Schalter |
+|---|---|---|
+| **Schütteln → Herzflattern:** 1,5 s weiße Funken über dem normalen Herz, nur am eigenen Badge und nur ohne ferngesteuerten Effekt | an | Schwelle `IMU_SHAKE_G` (1,2 g), `IMU_SHAKE_HITS`, `IMU_FLUTTER_MS` |
+| **Herz immer aufrecht:** dreht das Herz in 90°-Schritten nach der Schwerkraft | **aus** | `IMU_AUTO_ROTATE=1`, dazu `IMU_ROTATION_OFFSET` (0–3) und `IMU_MIRROR` (0/1) |
+| **Abdunkeln in Ruhe:** nach der eingestellten Zeit ohne Bewegung leuchtet das normale Herz nur mit `BRIGHT_MIN` | **aus** | `IMU_REST_DIM_MS` (z. B. `300000` für 5 min) |
+
+**„Herz immer aufrecht" einmessen** (einmal für den Board-Typ, weil die Lage des Sensors zur LED-Matrix nicht aus den Unterlagen hervorgeht):
+
+1. Debug-Build mit `-DIMU_AUTO_ROTATE=1 -DENABLE_SERIAL_DEBUG=1` flashen, seriellen Monitor öffnen. Alle 2 s erscheint `[IMU] x=… y=… z=… |a|=… Lage=N Drehung=M`.
+2. Badge so halten, wie es getragen wird. Zeigt das Herz nicht aufrecht, `IMU_ROTATION_OFFSET` so wählen, dass `(Lage + Offset) mod 4 = 0` ergibt.
+3. Badge um 90° im Uhrzeigersinn drehen. Dreht sich das Herz in die falsche Richtung, `IMU_MIRROR=1` setzen und den Offset mit `(4 − Lage + Offset) mod 4 = 0` neu bestimmen.
+4. Beide Werte im Sketch eintragen und `IMU_AUTO_ROTATE` auf `1` stellen.
+
+Liegt das Badge flach (weniger als 0,6 g in der Matrix-Ebene), bleibt die letzte Drehung stehen.
+
 ### Serial-Debug & Morse-Logging
 - **Aktivierung:** Im Sketch `ENABLE_SERIAL_DEBUG` auf `1` setzen *oder* beim Kompilieren `-DENABLE_SERIAL_DEBUG=1` wie oben.
 - **Aus:** Standard im Sketch ist `0` — dann gibt es **keinen** Serial-Code in der Hauptschleife (kein Einfluss auf die Animation).
@@ -247,7 +266,7 @@ scripts/version.sh tag            # annotierten Tag setzen
 
 **Beispiel:** Code-Stand ist `1.2.0`, seit `v1.2.0.0` gab es 5 Commits → Tag `v1.2.0.5`. Nach Merge in `main` und Diskussion über ein neues Feature wird C auf `1` gesetzt → `1.2.1` → nächster Tag wird `v1.2.1.0`. Bump auf `1.3.0` (großes Feature) → C wieder auf `0` → `v1.3.0.0`. Bump auf `2.0.0` (Breaking Change) → kompletter Reset.
 
-**Aktueller Stand:** `1.7.0` (neu: Funk-Update über WLAN, Modus `13`, siehe *Funk-Update der Badges*. 1.6.0: die Nähe steuert nur noch die Helligkeit und meint das nächste Badge statt des Durchschnitts, das Tempo ist je Modus fest; ferngesteuerte Effekte mit fester Helligkeit; der Morse-Virus endet nach 3 s; „Alle stoppen" mit Kennung. 1.5.1: echtes 50-Hz-Frame-Raster und 20-Hz-Sync — vorher zählte die Arbeitszeit des Frames nicht mit, effektiv ~44 Hz / ~15 Hz; Basisstation und Bridge zählen nicht mehr als Peer; Regenbogen-Farbton läuft über den Schwarm-Takt und ist damit zwischen Badges synchron. 1.5.0: alle visuellen Effekte laufen endlos bis Stopp bzw. bis ein neuer Effekt sie ersetzt; Tap-Meldung via BOOT-Taste (Modus `11`) und globaler Stopp (Modus `12`)) — letzter Tag `v1.3.0.0`. Versionen aller Module: siehe *Versionen aller Module*.
+**Aktueller Stand:** `1.8.0` (neu: Bewegungssensor — Schütteln lässt das Herz flattern, „Herz immer aufrecht" und Abdunkeln in Ruhe als Optionen, siehe *Bewegungssensor*. 1.7.0: Funk-Update über WLAN, Modus `13`, siehe *Funk-Update der Badges*. 1.6.0: die Nähe steuert nur noch die Helligkeit und meint das nächste Badge statt des Durchschnitts, das Tempo ist je Modus fest; ferngesteuerte Effekte mit fester Helligkeit; der Morse-Virus endet nach 3 s; „Alle stoppen" mit Kennung. 1.5.1: echtes 50-Hz-Frame-Raster und 20-Hz-Sync — vorher zählte die Arbeitszeit des Frames nicht mit, effektiv ~44 Hz / ~15 Hz; Basisstation und Bridge zählen nicht mehr als Peer; Regenbogen-Farbton läuft über den Schwarm-Takt und ist damit zwischen Badges synchron. 1.5.0: alle visuellen Effekte laufen endlos bis Stopp bzw. bis ein neuer Effekt sie ersetzt; Tap-Meldung via BOOT-Taste (Modus `11`) und globaler Stopp (Modus `12`)) — letzter Tag `v1.3.0.0`. Versionen aller Module: siehe *Versionen aller Module*.
 
 **Änderungen v1.1.0 (Performance-Optimierung):**
 - `String` → `char[12]` für Morse-Puffer (kein Heap-Overhead)
@@ -270,7 +289,7 @@ Das A.B.C.D-Schema oben beschreibt **nur die Badge-Firmware** (`Herz_Schwarm_CCC
 
 | Modul | Datei | Define/Feld | Aktuell |
 |-------|-------|-------------|---------|
-| Badge (Schwarm) | `Herz_Schwarm_CCC_V.ino` | `FW_VERSION_MAJOR/MINOR/PATCH` | 1.7.0 |
+| Badge (Schwarm) | `Herz_Schwarm_CCC_V.ino` | `FW_VERSION_MAJOR/MINOR/PATCH` | 1.8.0 |
 | Basisstation | `Herz_Schwarm_BaseStation/Herz_Schwarm_BaseStation.ino` | `BASESTATION_FW_MAJOR/MINOR/PATCH` | 0.4.2 |
 | Bridge (Nerves-Adapter) | `herz_schwarm_nerves/firmware/esp32_bridge/esp32_bridge.ino` | `BRIDGE_FW_MAJOR/MINOR/PATCH` | 0.5.0 |
 | Nerves/Phoenix-App | `herz_schwarm_nerves/mix.exs` | `@version` | 0.3.0 |

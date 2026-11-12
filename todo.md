@@ -1,8 +1,15 @@
 # Todo / Notizen (Projekt Herz-Schwarm)
 
-Stand: 2026-11-12 — Badge 1.7.0, Basisstation 0.4.2, Bridge 0.5.0, Nerves-App 0.3.0, Flash-Tooling 0.1.0 (Versionen aller Module: README → *Versionen aller Module*).
+Stand: 2026-11-12 — Badge 1.8.0, Basisstation 0.4.2, Bridge 0.5.0, Nerves-App 0.3.0, Flash-Tooling 0.1.0 (Versionen aller Module: README → *Versionen aller Module*).
 
 ## Offen
+
+- **Bewegungssensor am Gerät testen** (Badge 1.8.0, bisher nur kompiliert): Debug-Build flashen, im Log muss
+  `[IMU] QMI8658 gefunden, aktiv` und danach alle 2 s eine Zeile mit `|a|` nahe 1.00 erscheinen. Steht dort
+  „Werte unplausibel" oder gar nichts, stimmen Register/Messbereich nicht mit den Annahmen im Sketch überein
+  (dann bleibt der Sensor aus, das Badge läuft normal). Danach: Schütteln → Herzflattern (Schwelle
+  `IMU_SHAKE_G` nachstellen, falls es beim Gehen/Tanzen dauernd oder nie auslöst) und „Herz immer aufrecht"
+  einmessen (README → *Bewegungssensor*), dann `IMU_AUTO_ROTATE` einschalten.
 
 - **Funk-Update der Badges am Gerät testen** (Badge 1.7.0 / Bridge 0.5.0 / App 0.3.0; bisher nur kompiliert
   und in der CI geprüft). Reihenfolge: `ota_secret.h` anlegen, **zwei** Badges per USB mit 1.7.0 flashen,

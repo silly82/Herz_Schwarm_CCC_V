@@ -21,6 +21,15 @@
 #define OTA_ENABLED 0
 #endif
 
+// Bewegungssensor (QMI8658 auf der Waveshare ESP32-S3-Matrix, ab 1.8.0). Abschalten mit
+// -DENABLE_IMU=0. Antwortet beim Start kein passender Sensor, bleibt die Funktion von selbst aus.
+#ifndef ENABLE_IMU
+#define ENABLE_IMU 1
+#endif
+#if ENABLE_IMU
+#include <Wire.h>
+#endif
+
 // Serial-Ausgaben blockieren und können die Animation ruckeln lassen — Standard: aus.
 // Aktivieren: hier auf 1 setzen oder Build-Flag: -DENABLE_SERIAL_DEBUG=1
 #ifndef ENABLE_SERIAL_DEBUG
@@ -45,8 +54,8 @@
  *              Commits seit 1.2.0 (oder seit letztem A.B.C-Wechsel).
  */
 #define FW_VERSION_MAJOR 1
-#define FW_VERSION_MINOR   7
-#define FW_VERSION_PATCH   0  // 1.7.0: Funk-Update (OTA über WLAN, Modus 13, nur mit ota_secret.h); 1.6.0: Nähe steuert nur noch die Helligkeit (Tempo fest je Modus) und meint das nächste Badge statt des Mittels; ferngesteuerte Effekte mit fester Helligkeit; Morse-Virus endet nach 3 s; „Alle stoppen“ mit Kennung; 1.5.1: echtes 50-Hz-Frame-Raster + 20-Hz-Sync, Stationen zählen nicht als Peer, Regenbogen-Farbton schwarmsynchron; 1.5.0: Tap-Counter (Modus 11); Effekte laufen endlos bis „Alle stoppen“ (Modus 12), letzter Effekt gewinnt; 1.4.1: Welle läuft endlos (Zyklus 4 s) bis Stopp über Modus 10
+#define FW_VERSION_MINOR   8
+#define FW_VERSION_PATCH   0  // 1.8.0: Bewegungssensor — Schütteln lässt das Herz flattern; Herz-immer-aufrecht und Abdunkeln in Ruhe als Optionen; 1.7.0: Funk-Update (OTA über WLAN, Modus 13, nur mit ota_secret.h); 1.6.0: Nähe steuert nur noch die Helligkeit (Tempo fest je Modus) und meint das nächste Badge statt des Mittels; ferngesteuerte Effekte mit fester Helligkeit; Morse-Virus endet nach 3 s; „Alle stoppen“ mit Kennung; 1.5.1: echtes 50-Hz-Frame-Raster + 20-Hz-Sync, Stationen zählen nicht als Peer, Regenbogen-Farbton schwarmsynchron; 1.5.0: Tap-Counter (Modus 11); Effekte laufen endlos bis „Alle stoppen“ (Modus 12), letzter Effekt gewinnt; 1.4.1: Welle läuft endlos (Zyklus 4 s) bis Stopp über Modus 10
 #define FW_DEBUG_BUILD     1  // Nur Debug-Zweig: bei sichtbarem neuen Debug-Stand +1, max 99
 
 #if FW_DEBUG_BUILD < 1 || FW_DEBUG_BUILD > 99
@@ -76,6 +85,38 @@ static const char *volatile fwMarkerPtr = FW_MARKER;
 #define NEAR_SMOOTH 0.08f
 // Glättung des Signals je Peer pro Paket (20 Hz): fängt das RSSI-Rauschen einzelner Pakete ab
 #define PEER_RSSI_SMOOTH 0.2f
+
+// --- BEWEGUNGSSENSOR (QMI8658, I²C) ---
+#define IMU_SDA_PIN   11
+#define IMU_SCL_PIN   12
+#define IMU_ADDR      0x6B   // SA0 auf GND
+#define IMU_READ_INTERVAL_MS 40   // 25 Hz reichen für Lage und Schütteln (~1 ms I²C je Lesung)
+// Schütteln: so viele Messungen mit |a| mehr als IMU_SHAKE_G von 1 g entfernt, innerhalb des
+// Fensters → das Herz „flattert“ (weiße Funken, nur lokal, nur ohne ferngesteuerten Effekt).
+#define IMU_SHAKE_G          1.2f
+#define IMU_SHAKE_HITS       3
+#define IMU_SHAKE_WINDOW_MS  600
+#define IMU_FLUTTER_MS       1500
+// Herz immer aufrecht: dreht das Herz in 90°-Schritten nach der Schwerkraft. Standard AUS,
+// weil die Lage des Sensors zur LED-Matrix erst einmal am Gerät bestimmt werden muss
+// (README: „Bewegungssensor“). Danach IMU_ROTATION_OFFSET/IMU_MIRROR setzen und einschalten.
+#ifndef IMU_AUTO_ROTATE
+#define IMU_AUTO_ROTATE      0
+#endif
+#ifndef IMU_ROTATION_OFFSET
+#define IMU_ROTATION_OFFSET  0    // 0…3: Drehung, die in der Trage-Lage „aufrecht“ ergibt
+#endif
+#ifndef IMU_MIRROR
+#define IMU_MIRROR           0    // 1, wenn sich das Herz beim Drehen in die falsche Richtung dreht
+#endif
+#define IMU_UPRIGHT_MIN_G    0.6f // so viel Schwerkraft muss in der Matrix-Ebene liegen (sonst liegt das Badge flach)
+#define IMU_ROT_HOLD_MS      400  // neue Lage muss so lange anliegen
+// Abdunkeln in Ruhe: nach so vielen ms ohne Bewegung leuchtet das normale Herz nur noch mit
+// BRIGHT_MIN. 0 = aus (Standard: Badges können auch als ruhende Installation ausliegen).
+#ifndef IMU_REST_DIM_MS
+#define IMU_REST_DIM_MS      0
+#endif
+#define IMU_MOTION_G         0.08f
 
 // --- CCC & SYNC SETTINGS ---
 #define CCC_CHANNEL 13          
@@ -872,6 +913,153 @@ void OnDataRecv(const esp_now_recv_info_t *recv_info, const uint8_t *incomingDat
     portEXIT_CRITICAL(&stateMux);
 }
 
+// ===================== BEWEGUNGSSENSOR (QMI8658) =====================
+// Nur der Beschleunigungssensor (±8 g, 125 Hz), gelesen aus loop(). Drei Verwendungen:
+// Schütteln → Herzflattern; optional Herz immer aufrecht; optional Abdunkeln in Ruhe.
+// Alles bleibt aus, wenn der Sensor beim Start nicht antwortet oder keine ~1 g meldet —
+// die Firmware läuft dann wie ohne Sensor.
+static uint64_t heartMaskRot[4];   // Herz-Maske in 0°, 90°, 180°, 270° (im Uhrzeigersinn)
+static uint8_t  heartRot = 0;      // aktuell verwendete Drehung
+#if ENABLE_IMU
+#define IMU_REG_WHO_AM_I 0x00      // liefert 0x05
+#define IMU_REG_CTRL1    0x02
+#define IMU_REG_CTRL2    0x03
+#define IMU_REG_CTRL7    0x08
+#define IMU_REG_AX_L     0x35      // AX_L, AX_H, AY_L, AY_H, AZ_L, AZ_H
+#define IMU_LSB_PER_G    4096.0f   // bei ±8 g
+
+static bool     imuOk = false;
+static uint8_t  imuErrors = 0;
+static uint32_t imuFlutterUntil = 0;
+static bool     imuFlutter = false;
+static uint32_t imuLastMotion = 0;
+
+static bool imuWrite(uint8_t reg, uint8_t val) {
+    Wire.beginTransmission((uint8_t)IMU_ADDR);
+    Wire.write(reg);
+    Wire.write(val);
+    return Wire.endTransmission() == 0;
+}
+
+static bool imuRead(uint8_t reg, uint8_t *buf, uint8_t n) {
+    Wire.beginTransmission((uint8_t)IMU_ADDR);
+    Wire.write(reg);
+    if (Wire.endTransmission(false) != 0) return false;
+    if (Wire.requestFrom((uint8_t)IMU_ADDR, (size_t)n) != n) return false;
+    for (uint8_t i = 0; i < n; i++) buf[i] = (uint8_t)Wire.read();
+    return true;
+}
+
+// Beschleunigung in g je Achse (Sensor-Achsen).
+static bool imuReadAccel(float *x, float *y, float *z) {
+    uint8_t b[6];
+    if (!imuRead(IMU_REG_AX_L, b, sizeof(b))) return false;
+    *x = (int16_t)((uint16_t)b[1] << 8 | b[0]) / IMU_LSB_PER_G;
+    *y = (int16_t)((uint16_t)b[3] << 8 | b[2]) / IMU_LSB_PER_G;
+    *z = (int16_t)((uint16_t)b[5] << 8 | b[4]) / IMU_LSB_PER_G;
+    return true;
+}
+
+static void imuInit() {
+    Wire.begin(IMU_SDA_PIN, IMU_SCL_PIN, 100000);  // 100 kHz: das Board hat keine I²C-Pull-ups
+    Wire.setTimeOut(20);
+    uint8_t id = 0;
+    if (!imuRead(IMU_REG_WHO_AM_I, &id, 1) || id != 0x05) return;  // kein QMI8658
+    imuWrite(IMU_REG_CTRL1, 0x60);  // Register-Adresse zählt beim Lesen automatisch hoch
+    imuWrite(IMU_REG_CTRL2, 0x26);  // Beschleunigung ±8 g, 125 Hz
+    imuWrite(IMU_REG_CTRL7, 0x01);  // nur Beschleunigungssensor an (Gyro bleibt aus)
+    delay(30);
+    // Plausibilität: in Ruhe müssen etwa 1 g herauskommen. Sonst stimmt Messbereich oder
+    // Byte-Reihenfolge nicht mit den Annahmen hier überein → Sensor nicht verwenden.
+    for (int i = 0; i < 5 && !imuOk; i++) {
+        float x, y, z;
+        if (imuReadAccel(&x, &y, &z)) {
+            const float mag = sqrtf(x * x + y * y + z * z);
+            if (mag > 0.7f && mag < 1.4f) imuOk = true;
+        }
+        if (!imuOk) delay(10);
+    }
+    imuLastMotion = millis();
+#if ENABLE_SERIAL_DEBUG
+    Serial.printf("[IMU] QMI8658 gefunden, %s\n", imuOk ? "aktiv" : "Werte unplausibel -> aus");
+#endif
+}
+
+// Einmal pro Frame aus loop(); liest höchstens alle IMU_READ_INTERVAL_MS.
+static void imuPoll(uint32_t now) {
+    static uint32_t lastRead = 0;
+    if (imuFlutter && (int32_t)(now - imuFlutterUntil) >= 0) imuFlutter = false;
+    if (!imuOk || now - lastRead < IMU_READ_INTERVAL_MS) return;
+    lastRead = now;
+
+    float x, y, z;
+    if (!imuReadAccel(&x, &y, &z)) {
+        if (++imuErrors >= 10) imuOk = false;  // Sensor antwortet nicht mehr: aufgeben
+        return;
+    }
+    imuErrors = 0;
+
+    // --- Lage: welche Kante zeigt nach unten? (nur wenn genug Schwerkraft in der Matrix-Ebene liegt)
+    const float ax = fabsf(x), ay = fabsf(y);
+    int8_t cand = -1;
+    if (ax > IMU_UPRIGHT_MIN_G && ax > 1.5f * ay) cand = x > 0 ? 0 : 2;
+    else if (ay > IMU_UPRIGHT_MIN_G && ay > 1.5f * ax) cand = y > 0 ? 1 : 3;
+#if IMU_AUTO_ROTATE
+    static int8_t pending = -1;
+    static uint32_t pendingSince = 0;
+    if (cand < 0) {
+        pending = -1;  // flach oder schräg: Lage behalten
+    } else {
+        const uint8_t rot = (uint8_t)(((IMU_MIRROR ? 4 - cand : cand) + IMU_ROTATION_OFFSET) & 3);
+        if (rot == heartRot) {
+            pending = -1;
+        } else if (pending != (int8_t)rot) {
+            pending = (int8_t)rot;
+            pendingSince = now;
+        } else if (now - pendingSince >= IMU_ROT_HOLD_MS) {
+            heartRot = rot;
+            pending = -1;
+        }
+    }
+#endif
+
+    // --- Schütteln: mehrere deutlich von 1 g abweichende Messungen kurz nacheinander
+    const float mag = sqrtf(x * x + y * y + z * z);
+    static uint8_t hits = 0;
+    static uint32_t firstHit = 0;
+    if (fabsf(mag - 1.0f) > IMU_SHAKE_G) {
+        if (hits == 0 || now - firstHit > IMU_SHAKE_WINDOW_MS) {
+            hits = 0;
+            firstHit = now;
+        }
+        if (++hits >= IMU_SHAKE_HITS) {
+            hits = 0;
+            imuFlutter = true;
+            imuFlutterUntil = now + IMU_FLUTTER_MS;
+        }
+    }
+
+    // --- Bewegung (für das Abdunkeln in Ruhe): Abstand zur letzten gemerkten Lage
+    static float refX = 0, refY = 0, refZ = 0;
+    if (fabsf(x - refX) > IMU_MOTION_G || fabsf(y - refY) > IMU_MOTION_G || fabsf(z - refZ) > IMU_MOTION_G) {
+        refX = x; refY = y; refZ = z;
+        imuLastMotion = now;
+    }
+
+#if ENABLE_SERIAL_DEBUG
+    // Zum Einmessen von IMU_ROTATION_OFFSET / IMU_MIRROR: „Lage“ ist der Rohwert 0…3 (−1 = flach).
+    static uint32_t lastLog = 0;
+    if (now - lastLog >= 2000) {
+        lastLog = now;
+        Serial.printf("[IMU] x=%.2f y=%.2f z=%.2f |a|=%.2f Lage=%d Drehung=%u\n",
+                      x, y, z, mag, (int)cand, (unsigned)heartRot);
+    }
+#else
+    (void)cand;
+#endif
+}
+#endif  // ENABLE_IMU
+
 void setup() {
 #if ENABLE_SERIAL_DEBUG
     Serial.begin(115200);
@@ -899,6 +1087,16 @@ void setup() {
     for (int i = 0; i < 64; i++) {
         if (heartMask[i / 8][i % 8]) heartMask64 |= (1ULL << i);
     }
+    // Gedrehte Masken (je 90° im Uhrzeigersinn weiter): neu[z][s] = alt[7 - s][z]
+    heartMaskRot[0] = heartMask64;
+    for (int k = 1; k < 4; k++) {
+        heartMaskRot[k] = 0;
+        for (int z = 0; z < 8; z++) {
+            for (int s = 0; s < 8; s++) {
+                if ((heartMaskRot[k - 1] >> ((7 - s) * 8 + z)) & 1) heartMaskRot[k] |= (1ULL << (z * 8 + s));
+            }
+        }
+    }
 
     WiFi.mode(WIFI_STA);
     esp_wifi_get_mac(WIFI_IF_STA, ownMac);
@@ -922,6 +1120,10 @@ void setup() {
     FastLED.addLeds<WS2812B, LED_PIN, RGB>(leds, NUM_LEDS);
     FastLED.clear();
     FastLED.show();
+
+#if ENABLE_IMU
+    imuInit();
+#endif
 }
 
 void loop() {
@@ -1128,6 +1330,9 @@ void loop() {
 #if OTA_ENABLED
     otaPoll(now);  // kehrt nicht zurück, sobald ein angenommenes Update startet
 #endif
+#if ENABLE_IMU
+    imuPoll(now);
+#endif
 
     uint8_t currentBright = BRIGHT_MIN + (uint8_t)(power * (BRIGHT_MAX - BRIGHT_MIN));
 
@@ -1251,9 +1456,27 @@ void loop() {
         activeMode = 0;
     }
 
-    // Maske: Bitmaske statt 2D-Array-Lookup
+#if ENABLE_IMU
+    // Herzflattern nach dem Schütteln: weiße Funken über dem normalen Herz. Nur lokal und nur
+    // ohne ferngesteuerten Effekt (activeMode 0), damit Effekte auf allen Badges gleich bleiben.
+    const bool flutter = imuFlutter && activeMode == 0 && !identifying;
+    if (flutter) {
+        for (int i = 0; i < 4; i++) leds[random8(64)] = CRGB::White;
+    }
+    // Abdunkeln in Ruhe (nur wenn eingeschaltet): das normale Herz leuchtet mit BRIGHT_MIN
+    const bool resting = imuOk && IMU_REST_DIM_MS > 0 && activeMode == 0 && !identifying &&
+                         now - imuLastMotion > (uint32_t)IMU_REST_DIM_MS;
+    if (flutter) {
+        if (currentBright < FX_BRIGHT) currentBright = FX_BRIGHT;  // Flattern soll man sehen
+    } else if (resting) {
+        currentBright = BRIGHT_MIN;
+    }
+#endif
+
+    // Maske: Bitmaske statt 2D-Array-Lookup (heartRot = Drehung nach der Lage, sonst immer 0)
+    const uint64_t mask = heartMaskRot[heartRot & 3];
     for (int i = 0; i < 64; i++) {
-        if (!((heartMask64 >> i) & 1)) leds[i] = CRGB::Black;
+        if (!((mask >> i) & 1)) leds[i] = CRGB::Black;
     }
 
     // 6. SENDEN — während der Welle trägt jedes Paket Wellenstart + eigene Verzögerung
