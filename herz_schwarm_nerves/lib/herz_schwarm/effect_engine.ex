@@ -21,13 +21,16 @@ defmodule HerzSchwarm.EffectEngine do
     :bpm,
     :beat_active,
     :beat_timer,
+    # Soll-Zeitpunkt des nächsten Beats (monotone ms); nil = keine laufende Beat-Kette
+    :beat_next,
     :color,
     :wave_id,
     :wave_running
   ]
 
   # Funk-Modus 10 = Welle stoppen (ID der Welle), Modus 12 = ALLE Effekte
-  # global stoppen (SYNC_MODE_STOP_ALL, virusID = 0, kein ID-Ziel).
+  # global stoppen (SYNC_MODE_STOP_ALL). Die virusID ist dort kein Effekt-Ziel,
+  # sondern die Kennung dieses Stopps (jedes Mal neu).
   @mode_wave_stop 10
   @mode_stop_all 12
 
@@ -115,6 +118,7 @@ defmodule HerzSchwarm.EffectEngine do
       bpm: 0,
       beat_active: false,
       beat_timer: nil,
+      beat_next: nil,
       color: {100, 150, 255},
       wave_id: nil,
       wave_running: false
@@ -131,7 +135,7 @@ defmodule HerzSchwarm.EffectEngine do
   @impl true
   def handle_cast({:trigger, mode, opts}, state) do
     # Stopp (10) nutzt die ID der laufenden Welle, sonst eine neue ID
-    id = if mode == 10, do: state.wave_id || 0, else: System.unique_integer([:positive])
+    id = if mode == 10, do: state.wave_id || 0, else: new_id()
 
     beat_counter =
       case mode do
@@ -203,7 +207,7 @@ defmodule HerzSchwarm.EffectEngine do
   end
 
   def handle_cast(:tap_beat, state) do
-    id = System.unique_integer([:positive])
+    id = new_id()
 
     cmd = %{
       cmd: "effect",
@@ -247,7 +251,7 @@ defmodule HerzSchwarm.EffectEngine do
 
   @impl true
   def handle_info(:beat_tick, %{beat_active: true, bpm: bpm} = state) when bpm > 0 do
-    id = System.unique_integer([:positive])
+    id = new_id()
 
     cmd = %{
       cmd: "effect",
@@ -265,13 +269,39 @@ defmodule HerzSchwarm.EffectEngine do
   end
 
   def handle_info(:beat_tick, state) do
-    {:noreply, %{state | beat_timer: nil}}
+    {:noreply, %{state | beat_timer: nil, beat_next: nil}}
   end
 
   # Plant den nächsten beat_tick gemäß state.bpm (muss > 0 sein).
+  # Der Soll-Zeitpunkt läuft auf einem festen Raster weiter (voriger Soll-Zeitpunkt +
+  # Intervall), statt ab "jetzt" zu rechnen: Verarbeitungszeit und Timer-Verspätung
+  # summieren sich so nicht auf, das Tempo driftet nicht. Nach einem Neustart der Kette
+  # (beat_next == nil) oder wenn das Raster schon in der Vergangenheit liegt, beginnt
+  # es bei "jetzt".
   defp schedule_beat(%{bpm: bpm} = state) do
-    timer = Process.send_after(self(), :beat_tick, div(60_000, bpm))
-    %{state | beat_active: true, beat_timer: timer}
+    interval = div(60_000, bpm)
+    now = System.monotonic_time(:millisecond)
+
+    next =
+      case state.beat_next do
+        prev when is_integer(prev) and prev + interval > now -> prev + interval
+        _ -> now + interval
+      end
+
+    timer = Process.send_after(self(), :beat_tick, next - now)
+    %{state | beat_active: true, beat_timer: timer, beat_next: next}
+  end
+
+  # Effekt-ID (virusID im SyncPacket): zufällig aus 100_001..0xFFFFFFFF.
+  # - Nie 0 (0 = "keine ID"/Wildcard).
+  # - Nie 1..99_999: dieser Bereich gehört dem Morse-Virus der Badges (MORSE_VIRUS_ID_MAX
+  #   in der Firmware), ein Virus mit so einer ID endet dort nach 3 s von selbst.
+  # - Zufällig statt Zähler: ein Zähler, der bei jedem App-Start wieder klein beginnt,
+  #   könnte eine ID wiederholen, die ein Badge noch als "schon gesehen" oder als gestoppte
+  #   Welle gespeichert hat — der Effekt würde dort stillschweigend ignoriert.
+  @morse_virus_id_max 99_999
+  defp new_id do
+    :rand.uniform(0xFFFFFFFF - @morse_virus_id_max - 1) + @morse_virus_id_max + 1
   end
 
   # Cancel any pending beat_tick, draining any already-queued message.
@@ -279,7 +309,7 @@ defmodule HerzSchwarm.EffectEngine do
   defp cancel_beat_timer(state) do
     case state.beat_timer do
       nil ->
-        state
+        %{state | beat_next: nil}
 
       ref ->
         Process.cancel_timer(ref)
@@ -290,7 +320,7 @@ defmodule HerzSchwarm.EffectEngine do
           0 -> :ok
         end
 
-        %{state | beat_timer: nil}
+        %{state | beat_timer: nil, beat_next: nil}
     end
   end
 
@@ -327,12 +357,14 @@ defmodule HerzSchwarm.EffectEngine do
 
   defp wave_running_after(_mode, running), do: running
 
-  # Modus 12 = alle Effekte global stoppen, kein ID-Ziel (virusID 0).
+  # Modus 12 = alle Effekte global stoppen. Jeder Stopp bekommt eine eigene Kennung:
+  # Badges (ab FW 1.6) verarbeiten jede Kennung genau einmal, damit ein verspätetes Echo
+  # keinen Effekt abschaltet, der nach dem Stopp gestartet wurde.
   defp stop_all_cmd do
     %{
       cmd: "effect",
       mode: @mode_stop_all,
-      virusID: 0,
+      virusID: new_id(),
       beatCounter: System.os_time(:millisecond)
     }
   end

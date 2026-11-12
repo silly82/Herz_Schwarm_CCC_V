@@ -66,13 +66,24 @@ defmodule HerzSchwarm.EffectEngineMetricsTest do
     EffectEngine.stop_all()
     assert %{wave_starts: 1, wave_stops: 1, commands_sent: 2} = counters()
     assert_receive {:wire, %{"mode" => 4}}
-    assert_receive {:wire, %{"mode" => 12, "virusID" => 0}}
+    assert_receive {:wire, %{"mode" => 12, "virusID" => stop_id}}
+    # Jeder Stopp traegt eine eigene Kennung (nie 0, ausserhalb des Morse-Bereichs 1..99_999).
+    assert is_integer(stop_id) and stop_id > 99_999
   end
 
   test "stop_all ohne Welle sendet trotzdem Modus 12" do
     EffectEngine.stop_all()
     assert %{commands_sent: 1, wave_stops: 0} = counters()
-    assert_receive {:wire, %{"cmd" => "effect", "mode" => 12, "virusID" => 0}}
+    assert_receive {:wire, %{"cmd" => "effect", "mode" => 12, "virusID" => stop_id}}
+    assert is_integer(stop_id) and stop_id > 99_999
+  end
+
+  test "zwei stop_all tragen verschiedene Kennungen" do
+    EffectEngine.stop_all()
+    EffectEngine.stop_all()
+    assert_receive {:wire, %{"mode" => 12, "virusID" => first}}
+    assert_receive {:wire, %{"mode" => 12, "virusID" => second}}
+    assert first != second
   end
 
   test "stop_all bei getrennter Bridge crasht nicht und raeumt lokalen Zustand auf" do

@@ -66,7 +66,7 @@
 #define MAGIC_ID        0x421337CC
 #define BRIDGE_FW_MAJOR 0
 #define BRIDGE_FW_MINOR 4
-#define BRIDGE_FW_PATCH 0  // 0.4.0: Tap-Counter (Modus 11) → UART-Event {"evt":"tap",…}; „Alle stoppen“ (Modus 12, endlose Effekte)
+#define BRIDGE_FW_PATCH 2  // 0.4.2: „Alle stoppen“ mit Kennung (virusID != 0), Effekt-IDs außerhalb des Morse-Bereichs; 0.4.1: Basisstation zählt nicht mehr als Station (keine unnötigen Retries, nicht in der Badge-Liste); 0.4.0: Tap-Counter (Modus 11) → UART-Event {"evt":"tap",…}; „Alle stoppen“ (Modus 12, endlose Effekte)
 
 #define MAX_JSON_LEN    256
 #define SERIAL_BAUD     115200
@@ -85,7 +85,8 @@
 #define SYNC_MODE_WAVE_STOP 10   // Welle manuell beenden (Badge-FW, die Modus 4 endlos laufen lässt)
 #define SYNC_MODE_TAP      11    // Tap-Counter: virusID = Zählerstand; weitergeleitet + 6 Byte Ursprungs-MAC (Badge-FW >= 1.5)
 #define TAP_FWD_PACKET_LEN (sizeof(SyncPacket) + 6)
-#define SYNC_MODE_STOP_ALL 12    // „Alle stoppen“: räumt alle Effekte ab (global, virusID 0; Badge-FW >= 1.5). Von der App sendbar, anders als 11
+#define SYNC_MODE_STOP_ALL 12    // „Alle stoppen“: räumt alle Effekte ab (virusID = Kennung des Stopps; Badge-FW >= 1.5, Kennung ab 1.6). Von der App sendbar, anders als 11
+#define MORSE_VIRUS_ID_MAX 99999UL  // IDs 1..99999 gehören dem Morse-Virus der Badges → von hier nie gesendet
 #define IDENTIFY_REPEATS   3     // Funk ist verlustbehaftet; Badge dedupliziert per virusID
 
 struct __attribute__((packed)) SyncPacket {
@@ -254,6 +255,11 @@ static void onDataRecv(const esp_now_recv_info_t *info, const uint8_t *data, int
         sp = (const SyncPacket *)data;
         virusID = sp->virusID;
     } else {
+        return;
+    }
+    // Andere Stationen (Basisstation, FW-Major 0) sind keine Badges: Sie bestätigen nie einen
+    // Effekt (würden nur Retries auslösen) und gehören nicht in die Badge-Liste.
+    if (sp && len >= (int)sizeof(SyncPacket) && sp->ver_major == 0) {
         return;
     }
 
@@ -560,13 +566,15 @@ static void handleCommand(const char *json) {
             return;
         }
         uint8_t mode = doc["mode"] | 0;
-        // Stopp: ID der laufenden Welle aus dem JSON, sonst 0 (Wildcard), nie Zufalls-ID.
-        // „Alle stoppen“ ist global: virusID immer 0.
-        uint32_t virusID = (mode == SYNC_MODE_STOP_ALL)
-                               ? (uint32_t)0
-                           : (mode == SYNC_MODE_WAVE_STOP)
-                               ? (doc["virusID"] | (uint32_t)0)
-                               : (doc["virusID"] | (uint32_t)esp_random());
+        // Wellen-Stopp: ID der laufenden Welle aus dem JSON, sonst 0 (Wildcard), nie Zufalls-ID.
+        // Alle anderen Modi — auch „Alle stoppen“, dessen ID die Kennung des Stopps ist (Badges
+        // ab 1.6 verarbeiten jede Kennung genau einmal) — brauchen eine ID != 0: fehlt sie oder
+        // ist sie 0 (ältere App), wird eine Zufalls-ID vergeben.
+        uint32_t virusID = doc["virusID"] | (uint32_t)0;
+        if (virusID == 0 && mode != SYNC_MODE_WAVE_STOP) virusID = (uint32_t)esp_random();
+        // IDs 1..MORSE_VIRUS_ID_MAX gehören dem Morse-Virus der Badges (endet dort nach 3 s):
+        // einheitlich aus dem Bereich schieben, damit Start und Wellen-Stopp dieselbe ID tragen.
+        if (virusID != 0 && virusID <= MORSE_VIRUS_ID_MAX) virusID += MORSE_VIRUS_ID_MAX + 1;
         uint32_t beatCounter = doc["beatCounter"] | (uint32_t)millis();
 
         // 9 (Identify) und 11 (Tap, reiner Empfangsmodus) sind über "effect" nicht sendbar

@@ -1,8 +1,22 @@
 # Todo / Notizen (Projekt Herz-Schwarm)
 
-Stand: 2026-10-20 — Badge 1.5.0, Basisstation 0.4.0, Bridge 0.4.0, Nerves-App 0.2.0, Flash-Tooling 0.1.0 (Versionen aller Module: README → *Versionen aller Module*).
+Stand: 2026-11-12 — Badge 1.6.0, Basisstation 0.4.2, Bridge 0.4.2, Nerves-App 0.2.2, Flash-Tooling 0.1.0 (Versionen aller Module: README → *Versionen aller Module*).
 
 ## Offen
+
+- **1.6.0 / 0.4.2 / App 0.2.2 flashen und am Gerät prüfen** (bisher nur kompiliert, nichts geflasht;
+  `mix test` lief nicht — kein Elixir auf dem Windows-Rechner):
+  - Badge 1.5.1-Anteil: Frame-Raster wirklich 50 Hz und Sync 20 Hz, Stationen zählen nicht mehr als Peer
+    (Primzahl/Singularität bei laufendem Beat prüfen), Regenbogen-Farbton zwischen Badges synchron.
+  - Badge 1.6.0: Helligkeit folgt dem **nächsten** Badge (Glättung `NEAR_SMOOTH`/`PEER_RSSI_SMOOTH` nach
+    Gefühl nachstellen), Tempo je Modus fest (normal ~58 BPM, Primzahl ~103, Regenbogen ~123);
+    ferngesteuerte Effekte mit `FX_BRIGHT` 64 — **Wärme bei Dauer-Ambient in Weiß prüfen**, ggf. senken;
+    Morse-Virus endet nach 3 s; „Alle stoppen" und direkt danach ein neuer Effekt → bleibt überall an.
+  - Gemischter Schwarm: 1.5.0-Badges leiten „Alle stoppen" ohne Kennung weiter und lassen den
+    Morse-Virus endlos laufen — beides ist erst sauber, wenn alle Badges auf 1.6.0 sind.
+  - Basisstation/Bridge 0.4.2: senden „Alle stoppen" mit Kennung, vergeben keine IDs im Morse-Bereich
+    (1…99999); führen sich gegenseitig nicht mehr in der Badge-Liste (0.4.1).
+  - App 0.2.2: Effekt-IDs zufällig (100001…2³²−1) statt Zähler, Beat-Takt ohne Drift.
 
 - **Restliche Badges auf 1.5.0 flashen:** Stand: 2 von 12 auf 1.5.0, eines auf 1.4.1. Dann mit vielen Badges
   in verschiedenen Abständen prüfen, ob die Welle sichtbar von Basis/Bridge nach außen läuft.

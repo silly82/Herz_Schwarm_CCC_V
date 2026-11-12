@@ -2,7 +2,7 @@ defmodule HerzSchwarm.MixProject do
   use Mix.Project
 
   @app :herz_schwarm
-  @version "0.2.0"
+  @version "0.2.2"
 
   def project do
     [

@@ -28,8 +28,8 @@
  *              Commits seit 1.2.0 (oder seit letztem A.B.C-Wechsel).
  */
 #define FW_VERSION_MAJOR 1
-#define FW_VERSION_MINOR   5
-#define FW_VERSION_PATCH   0  // 1.5.0: Tap-Counter (Modus 11); Effekte laufen endlos bis „Alle stoppen“ (Modus 12), letzter Effekt gewinnt; 1.4.1: Welle läuft endlos (Zyklus 4 s) bis Stopp über Modus 10
+#define FW_VERSION_MINOR   6
+#define FW_VERSION_PATCH   0  // 1.6.0: Nähe steuert nur noch die Helligkeit (Tempo fest je Modus) und meint das nächste Badge statt des Mittels; ferngesteuerte Effekte mit fester Helligkeit; Morse-Virus endet nach 3 s; „Alle stoppen“ mit Kennung; 1.5.1: echtes 50-Hz-Frame-Raster + 20-Hz-Sync, Stationen zählen nicht als Peer, Regenbogen-Farbton schwarmsynchron; 1.5.0: Tap-Counter (Modus 11); Effekte laufen endlos bis „Alle stoppen“ (Modus 12), letzter Effekt gewinnt; 1.4.1: Welle läuft endlos (Zyklus 4 s) bis Stopp über Modus 10
 #define FW_DEBUG_BUILD     1  // Nur Debug-Zweig: bei sichtbarem neuen Debug-Stand +1, max 99
 
 #if FW_DEBUG_BUILD < 1 || FW_DEBUG_BUILD > 99
@@ -42,6 +42,14 @@
 #define BUTTON_PIN  0     // BOOT-Button
 #define BRIGHT_MIN  4   
 #define BRIGHT_MAX  130   // Etwas reduziert wegen Hitzeentwicklung S3
+// Feste Helligkeit für ferngesteuerte Effekte (Virus, Regenbogen, Welle, Ambient, Strobe …):
+// unabhängig von der Nähe, damit ein Effekt auf allen Badges gleich hell ist. Bewusst unter
+// BRIGHT_MAX: Effekte laufen endlos, Dauer-Weiß auf allen Herz-Pixeln wird sonst zu heiß.
+#define FX_BRIGHT   64
+// Glättung der Nähe pro Frame (50 Hz): 0.08 ≈ 250 ms Zeitkonstante
+#define NEAR_SMOOTH 0.08f
+// Glättung des Signals je Peer pro Paket (20 Hz): fängt das RSSI-Rauschen einzelner Pakete ab
+#define PEER_RSSI_SMOOTH 0.2f
 
 // --- CCC & SYNC SETTINGS ---
 #define CCC_CHANNEL 13          
@@ -70,7 +78,12 @@
 #define SYNC_MODE_IDENTIFY 9  // "Badge finden": nur das Badge mit der Ziel-MAC blinkt grün
 #define SYNC_MODE_WAVE_STOP 10 // Welle manuell stoppen (Welle läuft sonst endlos im 4-s-Zyklus)
 #define SYNC_MODE_TAP      11 // Tap-Counter: virusID = Zählerstand (monoton, 32 Bit); weitergeleitet + 6 Byte Ursprungs-MAC
-#define SYNC_MODE_STOP_ALL 12 // „Alle stoppen“: global (virusID 0), räumt alle Effekte außer Identify ab; begrenzt weitergeleitet
+#define SYNC_MODE_STOP_ALL 12 // „Alle stoppen“: räumt alle Effekte außer Identify ab; virusID = Kennung des Stopps (jeder Stopp wirkt je Badge genau einmal; 0 = alte Sender ohne Kennung); begrenzt weitergeleitet
+// IDs 1..MORSE_VIRUS_ID_MAX sind dem Morse-Virus der Badges vorbehalten: ein solcher Virus
+// endet nach 3 s von selbst (am Badge gibt es keine Stopp-Geste). Stationen vergeben größere
+// IDs, deren Effekte laufen endlos bis zum Stopp.
+#define MORSE_VIRUS_ID_MAX 99999UL
+#define ALL_STOP_SEEN_SLOTS 4  // zuletzt verarbeitete Stopp-Kennungen (Ringpuffer)
 #define REMOTE_RAINBOW_MS  15000
 #define REMOTE_PRIME_MS    12000
 #define WAVE_DURATION_MS   4000    // Länge eines Wellenzyklus; die Welle wiederholt ihn endlos bis zum Stopp
@@ -158,6 +171,7 @@ struct PeerTracker {
     uint8_t ver_rel;
     uint8_t ver_dbg;
     uint8_t ver_known;  // 1 = mindestens ein Paket mit Versionsfeldern empfangen
+    float   rssi;       // geglättetes Signal dieses Badges (dBm) — das stärkste bestimmt die Nähe
 };
 PeerTracker seenPeers[MAX_PEERS];
 uint8_t uniquePeerCount = 0;
@@ -171,7 +185,6 @@ float smoothRSSI = -95;
 uint32_t heartBeatState = 0;     // Schwarm-Phase (siehe BEAT_UNITS_PER_PULSE)
 uint32_t beatCatchup = 0;        // noch aufzuholender Vorsprung des schnellsten Peers
 static uint32_t frameBeat = 0;   // Snapshot von heartBeatState für den aktuellen Frame
-uint8_t hueOffset = 0;
 uint8_t broadcastMac[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 static uint8_t ownMac[6] = {0};  // eigene STA-MAC, Ziel-Vergleich für SYNC_MODE_IDENTIFY
 
@@ -214,7 +227,13 @@ static uint32_t stopFwdNext = 0;       // Zeitpunkt der nächsten Sendung
 static uint32_t stopFwdId = 0;         // Ziel-Wellen-ID des weiterzuleitenden Stopps (unverändert aus dem Paket)
 static uint32_t stopLastSent = 0;      // Zeitpunkt der letzten Sendung (Beginn der Sperre)
 static bool     stopLockActive = false;
-// „Alle stoppen“ (Modus 12): gleiches Muster, aber global — keine ID, Dedup nur über die Sperre
+// „Alle stoppen“ (Modus 12): gleiches Weiterleitungs-Muster. Jeder Stopp trägt eine Kennung und
+// wird je Badge genau einmal verarbeitet (allStopSeen) — verspätete Echos desselben Stopps
+// schalten so keinen Effekt mehr ab, der danach gestartet wurde. Kennung 0 (alte Sender):
+// wie früher, jedes Paket räumt ab, Dedup der Weiterleitung nur über die Sperre.
+static uint32_t allStopSeen[ALL_STOP_SEEN_SLOTS] = {0};
+static uint8_t  allStopSeenPos = 0;
+static uint32_t allStopFwdId = 0;      // Kennung des weiterzuleitenden Stopps (unverändert aus dem Paket)
 static uint8_t  allStopFwdLeft = 0;
 static uint32_t allStopFwdNext = 0;
 static uint32_t allStopLastSent = 0;
@@ -393,6 +412,12 @@ static inline uint8_t swarmPulse(uint8_t lowest, uint8_t highest) {
     return lowest + scale8(sin8((uint8_t)(frameBeat >> 8)), highest - lowest);
 }
 
+// Regenbogen-Farbton aus derselben Schwarm-Phase: eine Farbrunde je zwei Pulse. So zeigen
+// alle Badges denselben Farbton (ein lokaler Zähler pro Frame liefe auseinander).
+static inline uint8_t swarmHue() {
+    return (uint8_t)(frameBeat >> 9);
+}
+
 // --- HELPER: PRIMZAHL (LUT, O(1)) ---
 static inline bool isPrimeFast(uint8_t n) {
     return (n < 27) ? primeLUT[n] : false;
@@ -401,8 +426,8 @@ static inline bool isPrimeFast(uint8_t n) {
 // --- PEER TRACKING: lineare Suche ---
 // Bei MAX_PEERS=25 schneller als jeder Hash und ohne Verwaltungs-Zustand,
 // der beim Wiederbelegen freier Slots inkonsistent werden kann. Aufruf unter stateMux.
-static void trackBadge(const uint8_t* mac, bool hasVer, uint8_t vmaj, uint8_t vmin, uint8_t vrel,
-                       uint8_t vdbg) {
+static void trackBadge(const uint8_t* mac, float rssi, bool hasVer, uint8_t vmaj, uint8_t vmin,
+                       uint8_t vrel, uint8_t vdbg) {
     uint32_t now = millis();
     int slot = -1;
     for (int i = 0; i < MAX_PEERS; i++) {
@@ -418,6 +443,9 @@ static void trackBadge(const uint8_t* mac, bool hasVer, uint8_t vmaj, uint8_t vm
     if (p.lastSeen == 0) {
         memcpy(p.mac, mac, 6);
         p.ver_known = 0;
+        p.rssi = rssi;  // neuer Peer: direkt übernehmen
+    } else {
+        p.rssi += (rssi - p.rssi) * PEER_RSSI_SMOOTH;
     }
     p.lastSeen = now;
     if (hasVer) {
@@ -444,13 +472,18 @@ void OnDataRecv(const esp_now_recv_info_t *recv_info, const uint8_t *incomingDat
     // now erst unter der Sperre lesen: so ist es nie früher als ein startTime/stopLastSent,
     // das loop() gerade gesetzt hat (now - x würde sonst überlaufen).
     const uint32_t now = millis();
-    trackBadge(recv_info->src_addr, hasVer, rx.ver_major, rx.ver_minor, rx.ver_rel, rx.ver_dbg);
-
-    smoothRSSI = (0.05f * currentRSSI) + (0.95f * smoothRSSI);
-    // Takt nur von Badges übernehmen: Stationen (Basisstation/Bridge, FW-Major 0)
-    // senden ihr millis() als beatCounter, das würde den Schwarm bei jedem Effekt
-    // in der Phase springen lassen. Bei Ambient ist beatCounter eine Farbe.
+    // Stationen (Basisstation/Bridge, FW-Major 0) sind keine Badges: nicht als Peer zählen,
+    // sonst verschiebt jeder Effekt (und ein laufender Beat dauerhaft) Primzahl/Singularität um eins.
     const bool fromStation = hasVer && rx.ver_major == 0;
+    if (!fromStation) {
+        // Das Signal wird je Peer geführt; loop() nimmt daraus das stärkste (nächstes Badge).
+        trackBadge(recv_info->src_addr, currentRSSI, hasVer, rx.ver_major, rx.ver_minor, rx.ver_rel,
+                   rx.ver_dbg);
+    }
+
+    // Takt nur von Badges übernehmen: Stationen senden ihr millis() als beatCounter,
+    // das würde den Schwarm bei jedem Effekt in der Phase springen lassen.
+    // Bei Ambient ist beatCounter eine Farbe.
     // (Tap-Pakete tragen millis() im beatCounter → nie als Takt übernehmen.)
     if (rx.mode != SYNC_MODE_AMBIENT && rx.mode != SYNC_MODE_TAP && !fromStation) {
         int32_t ahead = (int32_t)(rx.beatCounter - heartBeatState);
@@ -471,7 +504,7 @@ void OnDataRecv(const esp_now_recv_info_t *recv_info, const uint8_t *incomingDat
     if (rx.mode == SYNC_MODE_RAINBOW) VIS_START(E_RAINBOW, rx.virusID);
     if (rx.mode == SYNC_MODE_PRIME)   VIS_START(E_PRIME,   rx.virusID);
     if (rx.mode == SYNC_MODE_WAVE) {
-        // RSSI genau dieses Pakets (nicht smoothRSSI: der mittelt über alle Nachbarn).
+        // RSSI genau dieses Pakets (nicht smoothRSSI: das ist die Nähe zum nächsten Badge).
         // Badge-Pakete ab 1.4.0 tragen die Zyklus-Phase + Sender-Verzögerung;
         // Station und ältere Badges nicht (Phase 0, Sender-Verzögerung 0).
         uint32_t elapsed = 0, senderDelay = 0;
@@ -522,15 +555,34 @@ void OnDataRecv(const esp_now_recv_info_t *recv_info, const uint8_t *incomingDat
         }
     }
     if (rx.mode == SYNC_MODE_STOP_ALL) {
-        // Alle Effekte abräumen (auch Welle und Beat), nur Identify läuft seine 10 s zu Ende.
-        // Die IDs bleiben stehen: Echos/verspätete Pakete derselben Effekte starten nichts neu.
-        for (int i = 0; i < E_COUNT; i++) {
-            if (i != E_IDENTIFY) fx[i].active = false;
+        // Mit Kennung: jeder Stopp wirkt genau einmal. Ein Echo eines schon verarbeiteten Stopps
+        // wird ignoriert — es darf keinen Effekt abschalten, der nach dem Stopp gestartet wurde
+        // (dessen ID gälte sonst als „schon gesehen“ und er käme nie wieder).
+        // Ohne Kennung (0, alte Sender): wie früher, Weiterleitung nur über die Sperre begrenzt.
+        bool fresh = true, forward = false;
+        if (rx.virusID != 0) {
+            for (int i = 0; i < ALL_STOP_SEEN_SLOTS; i++) {
+                if (allStopSeen[i] == rx.virusID) fresh = false;
+            }
+            if (fresh) {
+                allStopSeen[allStopSeenPos] = rx.virusID;
+                allStopSeenPos = (allStopSeenPos + 1) % ALL_STOP_SEEN_SLOTS;
+                forward = true;
+            }
+        } else {
+            const bool locked = allStopLockActive && (now - allStopLastSent < ALL_STOP_LOCK_MS);
+            forward = (allStopFwdLeft == 0 && !locked);
         }
-        // Begrenzt weiterleiten (global, kein ID-Vergleich): nur wenn nicht schon eine Weiterleitung
-        // läuft und die Sperre abgelaufen ist; gesendet wird in loop().
-        const bool locked = allStopLockActive && (now - allStopLastSent < ALL_STOP_LOCK_MS);
-        if (allStopFwdLeft == 0 && !locked) {
+        if (fresh) {
+            // Alle Effekte abräumen (auch Welle und Beat), nur Identify läuft seine 10 s zu Ende.
+            // Die IDs bleiben stehen: Echos/verspätete Pakete derselben Effekte starten nichts neu.
+            for (int i = 0; i < E_COUNT; i++) {
+                if (i != E_IDENTIFY) fx[i].active = false;
+            }
+        }
+        // Begrenzt weiterleiten (Kennung unverändert); gesendet wird in loop().
+        if (forward) {
+            allStopFwdId = rx.virusID;
             allStopFwdLeft = ALL_STOP_FWD_COUNT;
             allStopFwdNext = now;
         }
@@ -641,9 +693,10 @@ void loop() {
     }
     if (morseLen > 0 && (now - lastBtnRelease > 800)) {
         if (strcmp(morseBuf, "-.-.") == 0) {
-            uint32_t id = (uint32_t)(esp_random() % 99999) + 1;
+            // ID im Morse-Bereich (1..MORSE_VIRUS_ID_MAX): dieser Virus endet überall nach 3 s
+            uint32_t id = (uint32_t)(esp_random() % MORSE_VIRUS_ID_MAX) + 1;
             portENTER_CRITICAL(&stateMux);
-            clearOtherVisualFx(E_VIRUS);  // letzter Effekt gewinnt (läuft endlos, bis „Alle stoppen“)
+            clearOtherVisualFx(E_VIRUS);  // letzter Effekt gewinnt
             fx[E_VIRUS].id = id;
             fx[E_VIRUS].startTime = now;
             fx[E_VIRUS].active = true;
@@ -676,33 +729,35 @@ void loop() {
     // späteren Wert gesetzt haben, now - x würde sonst überlaufen (Peer/Effekt weg).
     now = millis();
 
-    // 2. PEER COUNT & TIMEOUT CLEANUP
+    // 2. PEER COUNT & TIMEOUT CLEANUP + stärkstes Signal (= nächstes Badge)
     uniquePeerCount = 0;
+    float nearRSSI = -95.0f;  // kein Peer: ganz „fern“
     for (int i = 0; i < MAX_PEERS; i++) {
         if (seenPeers[i].lastSeen != 0) {
             if (now - seenPeers[i].lastSeen > PEER_TIMEOUT) {
                 seenPeers[i].lastSeen = 0;  // lastSeen==0 = Slot frei
             } else {
                 uniquePeerCount++;
+                if (seenPeers[i].rssi > nearRSSI) nearRSSI = seenPeers[i].rssi;
             }
         }
     }
 
-    // 3. DYNAMISCHES FADE-OUT
-    if (uniquePeerCount == 0) {
-        if (smoothRSSI > -95) smoothRSSI -= 0.5f;
-    } else {
-        smoothRSSI -= 0.01f;
-    }
+    // 3. NÄHE: weich dem nächsten Badge folgen (nicht dem Mittel über alle — in einer Gruppe
+    // ginge die Person direkt neben einem sonst im Durchschnitt unter). Verschwindet der
+    // nächste Peer, sinkt der Wert ebenso weich auf den zweitnächsten bzw. auf -95.
+    smoothRSSI += (nearRSSI - smoothRSSI) * NEAR_SMOOTH;
     if (smoothRSSI < -95) smoothRSSI = -95;
     rssiSnapshot = smoothRSSI;
 
-    // 4. RSSI MAPPING + Takt fortschreiben: Modus-Tempo des letzten Frames + RSSI-Anteil
+    // 4. RSSI MAPPING (nur Helligkeit) + Takt fortschreiben. Das Tempo hängt nur am Modus des
+    // letzten Frames, nicht an der Nähe: wegen der Max-Regel im Schwarm-Takt hätte sonst das
+    // am engsten stehende Paar das Tempo aller bestimmt.
     inputRSSI = constrain(rssiSnapshot, -95, -45);
     norm = (inputRSSI - (-95)) / 50.0f;
     power = norm * norm;
     {
-        float bpm = modeBpm + 23.4f + 117.2f * power;
+        float bpm = modeBpm + 23.4f;
         uint32_t beatStep = (uint32_t)(bpm * (float)(now - lastBeatMs) * (BEAT_UNITS_PER_PULSE / 60000.0f));
         uint32_t catchStep = beatCatchup ? beatCatchup / 4 + 1 : 0;
         if (catchStep > beatCatchup) catchStep = beatCatchup;
@@ -712,8 +767,9 @@ void loop() {
     lastBeatMs = now;
     frameBeat = heartBeatState;
 
-    // Nur Beat und Identify laufen aus; alle visuellen Effekte laufen endlos (bis Modus 12 oder
-    // ein anderer visueller Effekt). Snapshot für das Rendern.
+    // Nur Beat, Identify und der Morse-Virus (ID im Morse-Bereich) laufen aus; alle anderen
+    // visuellen Effekte laufen endlos (bis Modus 12 oder ein anderer visueller Effekt).
+    // Snapshot für das Rendern.
     for (int i = 0; i < E_COUNT; i++) {
         if (i == E_WAVE) {
             // Welle läuft endlos: nie ablaufen, sondern startTime um ganze Zyklen vorsetzen
@@ -723,7 +779,8 @@ void loop() {
                 uint32_t age = now - fx[i].startTime;
                 if (age >= WAVE_DURATION_MS) fx[i].startTime += (age / WAVE_DURATION_MS) * WAVE_DURATION_MS;
             }
-        } else if ((i == E_BEAT || i == E_IDENTIFY) && fx[i].active &&
+        } else if ((i == E_BEAT || i == E_IDENTIFY ||
+                    (i == E_VIRUS && fx[i].id <= MORSE_VIRUS_ID_MAX)) && fx[i].active &&
                    now - fx[i].startTime >= fxDurationMs[i]) {
             fx[i].active = false;
         }
@@ -749,8 +806,10 @@ void loop() {
 
     // „Alle stoppen“-Weiterleitung: gleiches Muster (max. 3 Sendungen, ~60 ms Abstand, dann Sperre)
     bool sendAllStopNow = false;
+    uint32_t allStopIdS = 0;
     if (allStopFwdLeft > 0 && (int32_t)(now - allStopFwdNext) >= 0) {
         sendAllStopNow = true;
+        allStopIdS = allStopFwdId;
         allStopFwdLeft--;
         allStopFwdNext = now + ALL_STOP_FWD_GAP_MS;
         if (allStopFwdLeft == 0) {  // letzte Sendung: ab jetzt 1000 ms Sperre
@@ -764,7 +823,7 @@ void loop() {
     // sendSync nimmt stateMux selbst (nicht verschachteln) — daher erst hier. Es setzt
     // txData.mode, der reguläre Sync-Block unten sendet dadurch im selben Frame direkt danach.
     if (sendStopNow) sendSync(SYNC_MODE_WAVE_STOP, stopIdS);
-    if (sendAllStopNow) sendSync(SYNC_MODE_STOP_ALL, 0);
+    if (sendAllStopNow) sendSync(SYNC_MODE_STOP_ALL, allStopIdS);
 
     // Tap-Counter senden (nicht blockierend, höchstens je ein Paket eigener Stand / Weiterleitung pro Frame)
     if (tapBurstLeft > 0 && (int32_t)(now - tapBurstNext) >= 0) {
@@ -839,17 +898,18 @@ void loop() {
         activeFxId = fs[E_BEAT].id;
     }
     else if (fs[E_VIRUS].active) {
-        // MORSE / REMOTE VIRUS BLITZ — endlos: Zyklus 3000 ms ist ein Vielfaches von 300 ms
+        // MORSE / REMOTE VIRUS BLITZ — Morse-Virus endet nach 3 s (siehe MORSE_VIRUS_ID_MAX),
+        // der von einer Station läuft endlos: Zyklus 3000 ms ist ein Vielfaches von 300 ms
         uint32_t flash = ((now - fs[E_VIRUS].startTime) % fxDurationMs[E_VIRUS]) % 300;
         if (flash < 150) fill_solid(leds, NUM_LEDS, CRGB::White);
         activeMode = SYNC_MODE_VIRUS;
         activeFxId = fs[E_VIRUS].id;
     }
-    else if (fs[E_RAINBOW].active) {  // endlos (hueOffset läuft weiter, kein Zeitfenster nötig)
-        hueOffset += 5;
+    else if (fs[E_RAINBOW].active) {  // endlos (Farbton + Puls über den Schwarm-Takt, kein Zeitfenster nötig)
         modeBpm = 100;
         pulse = swarmPulse(150, 255);
-        for (int i = 0; i < NUM_LEDS; i++) leds[i] = CHSV(hueOffset + (i*3), 255, pulse);
+        const uint8_t hue = swarmHue();
+        for (int i = 0; i < NUM_LEDS; i++) leds[i] = CHSV(hue + (i*3), 255, pulse);
         activeMode = SYNC_MODE_RAINBOW;
         activeFxId = fs[E_RAINBOW].id;
     }
@@ -910,16 +970,16 @@ void loop() {
     }
     else if (uniquePeerCount + 1 >= 17) {
         // THE SINGULARITY
-        hueOffset += 5;
         modeBpm = 100;
         pulse = swarmPulse(150, 255);
-        for (int i = 0; i < NUM_LEDS; i++) leds[i] = CHSV(hueOffset + (i*3), 255, pulse);
+        const uint8_t hue = swarmHue();
+        for (int i = 0; i < NUM_LEDS; i++) leds[i] = CHSV(hue + (i*3), 255, pulse);
         activeMode = 0;
     }
     else {
         uint8_t totalDevices = uniquePeerCount + 1;
         bool prime = isPrimeFast(totalDevices);
-        modeBpm = prime ? 80 : 35 + (uint8_t)(power * 55);
+        modeBpm = prime ? 80 : 35;
         pulse = prime ? swarmPulse(120, 255) : swarmPulse(100, 255);
         fill_solid(leds, NUM_LEDS, heartColor);
         nscale8(leds, NUM_LEDS, pulse);
@@ -936,15 +996,20 @@ void loop() {
     // (sendSync), damit Nachbarn ihre Verzögerung daraus ableiten bzw. verkürzen.
     // Gedrosselt auf SYNC_TX_INTERVAL_MS; Effekt-/ID-Wechsel sofort, damit sich
     // Effekte ohne Verzögerung durch den Schwarm verbreiten.
+    // Der Sendetakt bleibt auf einem festen 50-ms-Raster (lastTx += Intervall statt = now):
+    // 50 ms ist kein Vielfaches der 20-ms-Frames, sonst würde nur alle 60 ms gesendet.
     static uint32_t lastTx = 0;
-    if (now - lastTx >= SYNC_TX_INTERVAL_MS ||
-        activeMode != txData.mode || activeFxId != txData.virusID) {
+    const bool fxChanged = activeMode != txData.mode || activeFxId != txData.virusID;
+    const uint32_t sinceTx = now - lastTx;
+    if (fxChanged || sinceTx >= SYNC_TX_INTERVAL_MS) {
         sendSync(activeMode, activeFxId);
-        lastTx = now;
+        lastTx = (fxChanged || sinceTx >= 2 * SYNC_TX_INTERVAL_MS) ? now : lastTx + SYNC_TX_INTERVAL_MS;
     }
 
     // 7. OUTPUT
-    FastLED.setBrightness(identifying ? BRIGHT_MAX : currentBright);
+    // Identify: volle Helligkeit. Ferngesteuerter Effekt (activeMode != 0): feste Helligkeit,
+    // auf allen Badges gleich. Sonst (normales Herz, Singularität): Helligkeit nach Nähe.
+    FastLED.setBrightness(identifying ? BRIGHT_MAX : (activeMode != 0 ? FX_BRIGHT : currentBright));
     FastLED.show();
 
 #if ENABLE_SERIAL_DEBUG
@@ -981,11 +1046,13 @@ void loop() {
     }
 #endif
 
-    // 20 ms Frame-Limit, aber nicht blockierend für Watchdog
-    static uint32_t lastFrame = 0;
-    uint32_t frameTime = now - lastFrame;
+    // 20 ms Frame-Raster: nur den Rest des Frames warten. frameStart ist der Beginn dieses
+    // Durchlaufs (nach dem delay des vorigen gesetzt), die Arbeitszeit (FastLED.show ~2 ms,
+    // Funk) zählt also mit — sonst wären es 20 ms + Arbeitszeit, d. h. ~44 statt 50 Hz.
+    static uint32_t frameStart = 0;
+    uint32_t frameTime = millis() - frameStart;
     if (frameTime < 20) {
         delay(20 - frameTime);
     }
-    lastFrame = millis();
+    frameStart = millis();
 }

@@ -60,7 +60,8 @@
 #define SYNC_MODE_IDENTIFY   9   // "Badge finden": SyncPacket + 6 Byte Ziel-MAC
 #define SYNC_MODE_WAVE_STOP  10  // Welle manuell stoppen; ausserhalb von SYNC_MODE_MAX (Sonderfall)
 #define SYNC_MODE_TAP        11  // Tap-Counter (nur Empfang): virusID = Zählerstand; weitergeleitet + 6 Byte Ursprungs-MAC
-#define SYNC_MODE_STOP_ALL   12  // „Alle stoppen“: global (virusID 0), Badges leiten begrenzt weiter; Badge-FW >= 1.5
+#define SYNC_MODE_STOP_ALL   12  // „Alle stoppen“: virusID = Kennung des Stopps (ab Badge-FW 1.6 wirkt jeder Stopp je Badge genau einmal), Badges leiten begrenzt weiter; Badge-FW >= 1.5
+#define MORSE_VIRUS_ID_MAX   99999UL  // IDs 1..99999 gehören dem Morse-Virus der Badges (endet dort nach 3 s) → hier nie vergeben
 #define TAP_FWD_PACKET_LEN   (sizeof(SyncPacket) + 6)
 #define TAP_PUBLISH_RETRY_MS 500 // Pause nach fehlgeschlagenem MQTT-Publish eines Tap-Events
 #define IDENTIFY_REPEATS     3   // Funk ist verlustbehaftet; Badge dedupliziert per virusID
@@ -70,7 +71,7 @@
 
 #define BASESTATION_FW_MAJOR 0
 #define BASESTATION_FW_MINOR     4
-#define BASESTATION_FW_PATCH     0  // 0.4.0: Tap-Counter (Modus 11): /api/peers "taps" + MQTT-Event {"evt":"tap",…}; „Alle stoppen“ (Modus 12, Effekte laufen endlos)
+#define BASESTATION_FW_PATCH     2  // 0.4.2: „Alle stoppen“ mit Kennung (virusID != 0), Effekt-IDs außerhalb des Morse-Bereichs; 0.4.1: andere Stationen (Bridge) nicht mehr in der Peer-Liste; 0.4.0: Tap-Counter (Modus 11): /api/peers "taps" + MQTT-Event {"evt":"tap",…}; „Alle stoppen“ (Modus 12, Effekte laufen endlos)
 
 #define MQTT_NS "hs_mqtt"
 #define MQTT_HOST_DEF    "192.168.1.10"
@@ -289,7 +290,11 @@ void OnDataRecv(const esp_now_recv_info_t *recv_info, const uint8_t *data, int l
     const bool hasVer = (len >= (int)sizeof(SyncPacket));
 
     int8_t rssi = recv_info->rx_ctrl->rssi;
-    updatePeer(recv_info->src_addr, rssi, hasVer, rx.ver_major, rx.ver_minor, rx.ver_rel, rx.ver_dbg);
+    // Andere Stationen (Nerves-Bridge, FW-Major 0) sind keine Badges → nicht in die Peer-Liste.
+    // Ihr Wellenzustand wird unten trotzdem gelernt.
+    if (!(hasVer && rx.ver_major == 0)) {
+        updatePeer(recv_info->src_addr, rssi, hasVer, rx.ver_major, rx.ver_minor, rx.ver_rel, rx.ver_dbg);
+    }
 
     // Tap-Counter: direkt (17 Byte, MAC = Absender) oder weitergeleitet (23 Byte, Ursprungs-MAC im Anhang)
     if (rx.mode == SYNC_MODE_TAP && hasVer) {
@@ -817,7 +822,9 @@ static SyncPacket makeSyncPacket(uint8_t mode, uint32_t beatCounter) {
     SyncPacket pkt = {};
     pkt.magic_id = MAGIC_ID;
     pkt.beatCounter = beatCounter;
+    // Zufalls-ID außerhalb des Morse-Bereichs (und damit nie 0)
     pkt.virusID = (uint32_t)esp_random();
+    if (pkt.virusID <= MORSE_VIRUS_ID_MAX) pkt.virusID += MORSE_VIRUS_ID_MAX + 1;
     pkt.mode = mode;
     pkt.ver_major = BASESTATION_FW_MAJOR;
     pkt.ver_minor = BASESTATION_FW_MINOR;
@@ -907,8 +914,9 @@ static void sendEffectBroadcast(uint8_t mode, uint32_t beatCounter) {
     SyncPacket pkt = makeSyncPacket(mode, beatCounter);
     // Stopp trägt die ID der laufenden Welle (0 = unbekannt, Badges stoppen dann ihre lokale Welle)
     if (mode == SYNC_MODE_WAVE_STOP) pkt.virusID = lastWaveId;
-    // Alle stoppen ist global: keine ID (die Badges leiten es begrenzt weiter, einmal senden reicht)
-    if (mode == SYNC_MODE_STOP_ALL) pkt.virusID = 0;
+    // Alle stoppen: behält die frische Zufalls-ID als Kennung des Stopps — Badges (ab 1.6)
+    // verarbeiten jede Kennung genau einmal, verspätete Echos schalten so keinen danach
+    // gestarteten Effekt ab. Die Badges leiten es begrenzt weiter, einmal senden reicht.
     // Stopp-Welle 3× im Abstand; Badges leiten den Stopp selbst begrenzt weiter
     int repeats = (mode == SYNC_MODE_WAVE_STOP) ? WAVE_STOP_REPEATS : 1;
     bool ok = false;
