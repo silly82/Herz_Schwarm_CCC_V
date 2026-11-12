@@ -4,6 +4,23 @@
 #include <esp_wifi.h>
 #include <Preferences.h>
 
+// Funk-Update (OTA über WLAN, ab 1.7.0): nur aktiv, wenn ota_secret.h (gitignored, Vorlage:
+// ota_secret.h.example) WLAN-Zugang und Schlüssel definiert. Ohne die Datei wird der gesamte
+// OTA-Code nicht mitkompiliert und Modus 13 ignoriert — im öffentlichen Repo steht bewusst
+// kein Standard-Schlüssel.
+#if __has_include("ota_secret.h")
+#include "ota_secret.h"
+#endif
+#if defined(OTA_WIFI_SSID) && defined(OTA_WIFI_PASS) && defined(OTA_KEY)
+#define OTA_ENABLED 1
+#include <HTTPClient.h>
+#include <NetworkClient.h>
+#include <Update.h>
+#include "mbedtls/md.h"
+#else
+#define OTA_ENABLED 0
+#endif
+
 // Serial-Ausgaben blockieren und können die Animation ruckeln lassen — Standard: aus.
 // Aktivieren: hier auf 1 setzen oder Build-Flag: -DENABLE_SERIAL_DEBUG=1
 #ifndef ENABLE_SERIAL_DEBUG
@@ -28,13 +45,22 @@
  *              Commits seit 1.2.0 (oder seit letztem A.B.C-Wechsel).
  */
 #define FW_VERSION_MAJOR 1
-#define FW_VERSION_MINOR   6
-#define FW_VERSION_PATCH   0  // 1.6.0: Nähe steuert nur noch die Helligkeit (Tempo fest je Modus) und meint das nächste Badge statt des Mittels; ferngesteuerte Effekte mit fester Helligkeit; Morse-Virus endet nach 3 s; „Alle stoppen“ mit Kennung; 1.5.1: echtes 50-Hz-Frame-Raster + 20-Hz-Sync, Stationen zählen nicht als Peer, Regenbogen-Farbton schwarmsynchron; 1.5.0: Tap-Counter (Modus 11); Effekte laufen endlos bis „Alle stoppen“ (Modus 12), letzter Effekt gewinnt; 1.4.1: Welle läuft endlos (Zyklus 4 s) bis Stopp über Modus 10
+#define FW_VERSION_MINOR   7
+#define FW_VERSION_PATCH   0  // 1.7.0: Funk-Update (OTA über WLAN, Modus 13, nur mit ota_secret.h); 1.6.0: Nähe steuert nur noch die Helligkeit (Tempo fest je Modus) und meint das nächste Badge statt des Mittels; ferngesteuerte Effekte mit fester Helligkeit; Morse-Virus endet nach 3 s; „Alle stoppen“ mit Kennung; 1.5.1: echtes 50-Hz-Frame-Raster + 20-Hz-Sync, Stationen zählen nicht als Peer, Regenbogen-Farbton schwarmsynchron; 1.5.0: Tap-Counter (Modus 11); Effekte laufen endlos bis „Alle stoppen“ (Modus 12), letzter Effekt gewinnt; 1.4.1: Welle läuft endlos (Zyklus 4 s) bis Stopp über Modus 10
 #define FW_DEBUG_BUILD     1  // Nur Debug-Zweig: bei sichtbarem neuen Debug-Stand +1, max 99
 
 #if FW_DEBUG_BUILD < 1 || FW_DEBUG_BUILD > 99
 #error "FW_DEBUG_BUILD muss zwischen 1 und 99 liegen (zweistelliger Debug-Zähler)."
 #endif
+
+// Versions-Marker im Binary: "HERZFW:1.7.0;". Die App liest daraus die Version einer
+// hochgeladenen .bin (für das Funk-Update), ohne dass man sie von Hand eintippen muss.
+// setup() liest den Marker über einen volatile-Zeiger, damit ihn der Linker nicht entfernt.
+#define FW_STR_(x) #x
+#define FW_STR(x) FW_STR_(x)
+static const char FW_MARKER[] =
+    "HERZFW:" FW_STR(FW_VERSION_MAJOR) "." FW_STR(FW_VERSION_MINOR) "." FW_STR(FW_VERSION_PATCH) ";";
+static const char *volatile fwMarkerPtr = FW_MARKER;
 
 // --- HARDWARE EINSTELLUNGEN ---
 #define LED_PIN     14    // Waveshare S3 Matrix intern
@@ -84,6 +110,17 @@
 // IDs, deren Effekte laufen endlos bis zum Stopp.
 #define MORSE_VIRUS_ID_MAX 99999UL
 #define ALL_STOP_SEEN_SLOTS 4  // zuletzt verarbeitete Stopp-Kennungen (Ringpuffer)
+// Funk-Update: SyncPacket + Zielversion, Server-IP/Port, Größe, MD5 und HMAC-Tag (54 Byte,
+// siehe OtaTrigger). Nur mit ota_secret.h wirksam; ältere Firmware ignoriert den Modus.
+#define SYNC_MODE_OTA      13
+#define OTA_TAG_LEN        8       // gekürzter HMAC-SHA256 über alles davor
+#define OTA_FWD_COUNT      3       // Auslöser begrenzt weiterleiten (wie Stopp) …
+#define OTA_FWD_GAP_MS     60
+#define OTA_SEEN_SLOTS     4       // zuletzt gesehene Auslöser-Kennungen (Ringpuffer)
+#define OTA_MIN_DELAY_MS   500     // erst weiterleiten, dann ins WLAN …
+#define OTA_JITTER_MS      6000    // … zufällig verteilt, damit nicht alle Badges gleichzeitig laden
+#define OTA_WIFI_TIMEOUT_MS  20000 // so lange auf das WLAN warten
+#define OTA_STALL_TIMEOUT_MS 10000 // so lange darf der Download stocken
 #define REMOTE_RAINBOW_MS  15000
 #define REMOTE_PRIME_MS    12000
 #define WAVE_DURATION_MS   4000    // Länge eines Wellenzyklus; die Welle wiederholt ihn endlos bis zum Stopp
@@ -395,6 +432,214 @@ static void tapSave() {
     }
 }
 
+// ===================== FUNK-UPDATE (OTA über WLAN, Modus 13) =====================
+// Ablauf: Die Station sendet einen signierten Auslöser (Zielversion, Server, Größe, MD5).
+// Ein Badge mit gültigem Tag leitet ihn begrenzt weiter. Ist die Zielversion neuer als die
+// eigene, verlässt es nach einer zufälligen Wartezeit den Schwarm-Funk, meldet sich am WLAN
+// aus ota_secret.h an, lädt http://<ip>:<port>/firmware/badge.bin, prüft Größe und MD5 und
+// startet neu. Jeder Ausgang (Erfolg wie Fehler) endet mit einem Neustart — das stellt den
+// Funk-Zustand am sichersten wieder her. Ein fehlgeschlagener Auslöser wird über den Neustart
+// hinweg gemerkt und nicht erneut versucht (erst ein neuer Auslöser mit neuer Kennung).
+// Schutz: Der Tag ist ein HMAC mit OTA_KEY — ohne Schlüssel lässt sich kein Update auslösen.
+// Nur neuere Versionen werden angenommen, ein mitgeschnittener alter Auslöser bewirkt nichts.
+#if OTA_ENABLED
+struct __attribute__((packed)) OtaTrigger {
+    SyncPacket hdr;        // mode = SYNC_MODE_OTA, virusID = Kennung des Auslösers
+    uint8_t  ver[3];       // Zielversion MAJOR, MINOR, PATCH
+    uint8_t  ip[4];        // Server (IPv4)
+    uint16_t port;
+    uint32_t size;         // Größe der .bin in Byte
+    uint8_t  md5[16];      // MD5 der .bin
+    uint8_t  tag[OTA_TAG_LEN];
+};
+static_assert(sizeof(OtaTrigger) == 54, "OtaTrigger muss 54 Byte lang sein (App und Bridge bauen dasselbe Paket)");
+#define OTA_SIGNED_LEN (sizeof(OtaTrigger) - OTA_TAG_LEN)
+
+// OnDataRecv legt einen Auslöser nur ab; geprüft (HMAC) und ausgeführt wird in loop().
+static uint8_t  otaRxBuf[sizeof(OtaTrigger)];  // unter stateMux
+static bool     otaRxPending = false;          // unter stateMux
+static uint32_t otaSeen[OTA_SEEN_SLOTS] = {0}; // unter stateMux
+static uint8_t  otaSeenPos = 0;                // unter stateMux
+// Ab hier nur loop():
+static bool     otaWaiting = false;            // Update angenommen, wartet auf den Start
+static OtaTrigger otaJob;
+static uint8_t  otaFwdBuf[sizeof(OtaTrigger)];
+static uint8_t  otaFwdLeft = 0;
+static uint32_t otaFwdNext = 0;
+static uint32_t otaStartAt = 0;
+// Überlebt den Software-Neustart (nicht das Aus- und Einschalten): Kennung des Auslösers,
+// dessen Update fehlgeschlagen ist.
+RTC_NOINIT_ATTR static uint32_t otaFailedId;
+
+static bool otaTagOk(const uint8_t *pkt) {
+    uint8_t mac[32];
+    const mbedtls_md_info_t *info = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
+    if (info == nullptr) return false;
+    if (mbedtls_md_hmac(info, (const uint8_t *)OTA_KEY, strlen(OTA_KEY), pkt, OTA_SIGNED_LEN, mac) != 0) {
+        return false;
+    }
+    uint8_t diff = 0;  // ohne vorzeitigen Abbruch vergleichen
+    for (int i = 0; i < OTA_TAG_LEN; i++) diff |= mac[i] ^ pkt[OTA_SIGNED_LEN + i];
+    return diff == 0;
+}
+
+// Herz von unten nach oben füllen (percent 0…100) — Fortschritt und Ergebnis des Updates.
+static void otaShow(uint8_t r, uint8_t g, uint8_t b, uint8_t percent) {
+    uint8_t total = 0;
+    for (int i = 0; i < NUM_LEDS; i++) total += (heartMask64 >> i) & 1;
+    uint8_t lit = (uint8_t)(((uint16_t)total * percent) / 100);
+    if (percent > 0 && lit == 0) lit = 1;
+    FastLED.clear();
+    for (int i = NUM_LEDS - 1; i >= 0 && lit > 0; i--) {
+        if ((heartMask64 >> i) & 1) {
+            leds[i] = CRGB(r, g, b);
+            lit--;
+        }
+    }
+    FastLED.setBrightness(FX_BRIGHT);
+    FastLED.show();
+}
+
+// Ende des Updates: grün = ok, rot = fehlgeschlagen; danach immer Neustart (kehrt nie zurück).
+static void otaEnd(bool ok, uint32_t id) {
+    if (!ok) {
+        Update.abort();
+        otaFailedId = id;
+    }
+#if ENABLE_SERIAL_DEBUG
+    Serial.printf("[OTA] %s, Neustart\n", ok ? "ok" : "fehlgeschlagen");
+#endif
+    if (ok) otaShow(0, 255, 0, 100); else otaShow(255, 0, 0, 100);
+    delay(ok ? 800 : 1500);
+    ESP.restart();
+    for (;;) delay(1000);
+}
+
+// Blockierend, kehrt nie zurück: WLAN, Download, Flash, Neustart.
+static void otaRun() {
+    const uint32_t id = otaJob.hdr.virusID;
+    const uint32_t size = otaJob.size;
+
+    esp_now_unregister_recv_cb();
+    esp_now_deinit();
+    WiFi.persistent(false);  // WLAN-Zugang nicht im Flash ablegen
+    WiFi.begin(OTA_WIFI_SSID, OTA_WIFI_PASS);
+    const uint32_t t0 = millis();
+    while (WiFi.status() != WL_CONNECTED) {
+        if (millis() - t0 > OTA_WIFI_TIMEOUT_MS) otaEnd(false, id);
+        otaShow(0, 0, 255, ((millis() / 250) % 2) ? 100 : 0);  // blau blinken: suche WLAN
+        delay(50);
+    }
+
+    char url[64];
+    snprintf(url, sizeof(url), "http://%u.%u.%u.%u:%u/firmware/badge.bin",
+             otaJob.ip[0], otaJob.ip[1], otaJob.ip[2], otaJob.ip[3], (unsigned)otaJob.port);
+    char md5hex[33];
+    for (int i = 0; i < 16; i++) snprintf(md5hex + 2 * i, 3, "%02x", otaJob.md5[i]);
+#if ENABLE_SERIAL_DEBUG
+    Serial.printf("[OTA] lade %s (%lu Byte)\n", url, (unsigned long)size);
+#endif
+
+    NetworkClient client;
+    HTTPClient http;
+    http.setConnectTimeout(5000);
+    http.setTimeout(8000);
+    if (!http.begin(client, url)) otaEnd(false, id);
+    const int code = http.GET();
+    if (code != HTTP_CODE_OK || http.getSize() != (int)size) {
+        http.end();
+        otaEnd(false, id);
+    }
+    if (!Update.begin(size, U_FLASH) || !Update.setMD5(md5hex)) {
+        http.end();
+        otaEnd(false, id);
+    }
+
+    NetworkClient *stream = http.getStreamPtr();
+    static uint8_t buf[1024];
+    uint32_t written = 0, lastData = millis();
+    uint8_t shownPct = 255;
+    while (written < size) {
+        const int avail = stream->available();
+        if (avail > 0) {
+            size_t want = (size_t)avail < sizeof(buf) ? (size_t)avail : sizeof(buf);
+            if (want > size - written) want = size - written;
+            const int n = stream->read(buf, want);
+            if (n <= 0) continue;
+            if (Update.write(buf, (size_t)n) != (size_t)n) {
+                http.end();
+                otaEnd(false, id);
+            }
+            written += (uint32_t)n;
+            lastData = millis();
+            const uint8_t pct = (uint8_t)((written * 100UL) / size);
+            if (pct / 4 != shownPct / 4) {  // nur alle 4 % neu zeichnen
+                shownPct = pct;
+                otaShow(0, 0, 255, pct);
+            }
+        } else {
+            if (!stream->connected() || millis() - lastData > OTA_STALL_TIMEOUT_MS) {
+                http.end();
+                otaEnd(false, id);
+            }
+            delay(2);
+        }
+    }
+    http.end();
+    otaEnd(Update.end(), id);  // end() prüft Größe und MD5 und schaltet den Boot-Slot um
+}
+
+// Einmal pro Frame aus loop(): abgelegten Auslöser prüfen, weiterleiten, ggf. Update starten.
+static void otaPoll(uint32_t now) {
+    uint8_t pkt[sizeof(OtaTrigger)];
+    bool have = false;
+    portENTER_CRITICAL(&stateMux);
+    if (otaRxPending) {
+        memcpy(pkt, otaRxBuf, sizeof(pkt));
+        otaRxPending = false;
+        have = true;
+    }
+    portEXIT_CRITICAL(&stateMux);
+
+    if (have && otaTagOk(pkt)) {
+        OtaTrigger t;
+        memcpy(&t, pkt, sizeof(t));
+        // Echter Auslöser: Kennung merken (jede nur einmal) und begrenzt weiterleiten —
+        // auch wenn dieses Badge schon aktuell ist, damit er Badges dahinter erreicht.
+        portENTER_CRITICAL(&stateMux);
+        otaSeen[otaSeenPos] = t.hdr.virusID;
+        otaSeenPos = (otaSeenPos + 1) % OTA_SEEN_SLOTS;
+        portEXIT_CRITICAL(&stateMux);
+        memcpy(otaFwdBuf, pkt, sizeof(otaFwdBuf));
+        otaFwdLeft = OTA_FWD_COUNT;
+        otaFwdNext = now;
+
+        const bool newer =
+            t.ver[0] != FW_VERSION_MAJOR ? t.ver[0] > FW_VERSION_MAJOR
+            : t.ver[1] != FW_VERSION_MINOR ? t.ver[1] > FW_VERSION_MINOR
+            : t.ver[2] > FW_VERSION_PATCH;
+        if (!otaWaiting && newer && t.size > 0 && t.hdr.virusID != otaFailedId) {
+            otaJob = t;
+            otaWaiting = true;
+            otaStartAt = now + OTA_MIN_DELAY_MS + (esp_random() % OTA_JITTER_MS);
+#if ENABLE_SERIAL_DEBUG
+            Serial.printf("[OTA] Update auf %u.%u.%u angenommen\n", t.ver[0], t.ver[1], t.ver[2]);
+#endif
+        }
+    }
+
+    if (otaFwdLeft > 0) {
+        if ((int32_t)(now - otaFwdNext) >= 0) {
+            esp_now_send(broadcastMac, otaFwdBuf, sizeof(otaFwdBuf));
+            otaFwdLeft--;
+            otaFwdNext = now + OTA_FWD_GAP_MS;
+        }
+    } else if (otaWaiting && (int32_t)(now - otaStartAt) >= 0) {
+        otaRun();
+    }
+}
+#endif  // OTA_ENABLED
+
 // Pulsbeginn nach Wellenstart: direkt von der Basis nach deren Signal, sonst Verzögerung
 // des weiterleitenden Badges plus ein Aufschlag nach dem Signal zu ihm. So läuft die
 // Welle auch zu Badges, die die Basis gar nicht hören, in Hop-Schritten weiter.
@@ -593,6 +838,19 @@ void OnDataRecv(const esp_now_recv_info_t *recv_info, const uint8_t *incomingDat
             ? incomingData + sizeof(SyncPacket) : recv_info->src_addr;
         if (memcmp(origin, ownMac, 6) != 0) tapOnReceive(origin, rx.virusID, now);  // eigene Echos ignorieren
     }
+#if OTA_ENABLED
+    // Funk-Update: nur ablegen (eine noch nicht gesehene Kennung, ein Platz); loop() prüft den HMAC.
+    if (rx.mode == SYNC_MODE_OTA && len == (int)sizeof(OtaTrigger) && !otaRxPending) {
+        bool seen = false;
+        for (int i = 0; i < OTA_SEEN_SLOTS; i++) {
+            if (otaSeen[i] == rx.virusID) seen = true;
+        }
+        if (!seen) {
+            memcpy(otaRxBuf, incomingData, sizeof(otaRxBuf));
+            otaRxPending = true;
+        }
+    }
+#endif
     if (rx.mode == SYNC_MODE_BEAT)    FX_START(E_BEAT,    rx.virusID);
     if (rx.mode == SYNC_MODE_ZONE)    VIS_START(E_ZONE,    rx.virusID);
     if (rx.mode == SYNC_MODE_AMBIENT && rx.virusID != fx[E_AMBIENT].id) {
@@ -620,6 +878,8 @@ void setup() {
     printFwVersionBanner();
 #endif
     pinMode(BUTTON_PIN, INPUT_PULLUP);
+    // Versions-Marker lesen (volatile-Zeiger): hält "HERZFW:x.y.z;" im Binary (siehe oben).
+    if (fwMarkerPtr[0] != 'H') return;
 
     // Tap-Zählerstand laden (Fehler → bei 0 starten) und nach dem Boot einmal melden
     {
@@ -864,6 +1124,10 @@ void loop() {
         tapLastSave = now;
         tapSave();
     }
+
+#if OTA_ENABLED
+    otaPoll(now);  // kehrt nicht zurück, sobald ein angenommenes Update startet
+#endif
 
     uint8_t currentBright = BRIGHT_MIN + (uint8_t)(power * (BRIGHT_MAX - BRIGHT_MIN));
 

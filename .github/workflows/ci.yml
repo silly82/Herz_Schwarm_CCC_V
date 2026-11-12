@@ -67,6 +67,16 @@ jobs:
             --build-property "compiler.cpp.extra_flags=-DENABLE_SERIAL_DEBUG=1" \
             --build-path "$RUNNER_TEMP/build/badge_debug" .
 
+      # Das Funk-Update wird nur mit ota_secret.h mitkompiliert. Hier mit der Vorlage bauen,
+      # damit auch dieser Code geprüft ist — die Binärdatei enthält die öffentlichen
+      # Beispielwerte und wird deshalb nicht als Artefakt abgelegt.
+      - name: Badge (mit Funk-Update, Beispiel-Schlüssel)
+        run: |
+          cp ota_secret.h.example ota_secret.h
+          arduino-cli compile --fqbn esp32:esp32:esp32s3 \
+            --build-path "$RUNNER_TEMP/build/badge_ota" .
+          rm ota_secret.h
+
       # Basisstation und Bridge nehmen ihre Board-Optionen aus der jeweiligen sketch.yaml.
       # Die Basisstation baut ohne ota_secret.h mit dem Standard-OTA-Passwort — die
       # Binärdatei aus der CI deshalb nicht auf eine echte Station flashen.

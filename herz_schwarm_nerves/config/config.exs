@@ -52,4 +52,12 @@ config :herz_schwarm,
 config :herz_schwarm,
   tap_store_path: "~/.local/share/herz-schwarm/taps.json"
 
+# Funk-Update der Badges (HerzSchwarm.BadgeOta):
+#  - badge_ota_dir: Ablage der hochgeladenen Badge-Firmware (nil = keine Ablage)
+#  - Schluessel: Umgebungsvariable BADGE_OTA_KEY (derselbe Text wie OTA_KEY in ota_secret.h
+#    der Badges); alternativ config :herz_schwarm, badge_ota_key: "..." in einer nicht
+#    eingecheckten Config. Ohne Schluessel laesst sich kein Update ausloesen.
+config :herz_schwarm,
+  badge_ota_dir: "~/.local/share/herz-schwarm"
+
 import_config "#{config_env()}.exs"

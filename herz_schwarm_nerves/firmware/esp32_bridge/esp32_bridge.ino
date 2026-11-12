@@ -11,6 +11,7 @@
  *   {"cmd":"status","seq":44}
  *   {"cmd":"peers","seq":45}
  *   {"cmd":"identify","mac":"A0:F2:62:EC:3B:B4","seq":46}
+ *   {"cmd":"badge_ota","pkt":"<base64, 54 Byte>","seq":51}      (Funk-Update der Badges auslösen, Paket fertig aus der App)
  *   {"cmd":"ota_begin","seq":47,"size":1048576,"ver":"0.3.0"}   (UART-OTA, siehe unten)
  *   {"cmd":"ota_chunk","seq":48,"off":0,"data":"<base64, 96 Rohbytes>"}
  *   {"cmd":"ota_end","seq":49}
@@ -65,8 +66,8 @@
 #define CCC_CHANNEL     13
 #define MAGIC_ID        0x421337CC
 #define BRIDGE_FW_MAJOR 0
-#define BRIDGE_FW_MINOR 4
-#define BRIDGE_FW_PATCH 2  // 0.4.2: „Alle stoppen“ mit Kennung (virusID != 0), Effekt-IDs außerhalb des Morse-Bereichs; 0.4.1: Basisstation zählt nicht mehr als Station (keine unnötigen Retries, nicht in der Badge-Liste); 0.4.0: Tap-Counter (Modus 11) → UART-Event {"evt":"tap",…}; „Alle stoppen“ (Modus 12, endlose Effekte)
+#define BRIDGE_FW_MINOR 5
+#define BRIDGE_FW_PATCH 0  // 0.5.0: Kommando "badge_ota" (Funk-Update der Badges auslösen, Modus 13); 0.4.2: „Alle stoppen“ mit Kennung (virusID != 0), Effekt-IDs außerhalb des Morse-Bereichs; 0.4.1: Basisstation zählt nicht mehr als Station (keine unnötigen Retries, nicht in der Badge-Liste); 0.4.0: Tap-Counter (Modus 11) → UART-Event {"evt":"tap",…}; „Alle stoppen“ (Modus 12, endlose Effekte)
 
 #define MAX_JSON_LEN    256
 #define SERIAL_BAUD     115200
@@ -88,6 +89,12 @@
 #define SYNC_MODE_STOP_ALL 12    // „Alle stoppen“: räumt alle Effekte ab (virusID = Kennung des Stopps; Badge-FW >= 1.5, Kennung ab 1.6). Von der App sendbar, anders als 11
 #define MORSE_VIRUS_ID_MAX 99999UL  // IDs 1..99999 gehören dem Morse-Virus der Badges → von hier nie gesendet
 #define IDENTIFY_REPEATS   3     // Funk ist verlustbehaftet; Badge dedupliziert per virusID
+// Funk-Update der Badges (Badge-FW >= 1.7): fertig signiertes Paket aus der App, hier nur durchgereicht.
+// 54 Byte = SyncPacket + Zielversion(3) + IP(4) + Port(2) + Größe(4) + MD5(16) + HMAC-Tag(8)
+#define SYNC_MODE_BADGE_OTA  13
+#define BADGE_OTA_PACKET_LEN 54
+#define BADGE_OTA_REPEATS    3
+#define BADGE_OTA_GAP_MS     60
 
 struct __attribute__((packed)) SyncPacket {
     uint32_t magic_id;
@@ -630,6 +637,31 @@ static void handleCommand(const char *json) {
             e["msg"] = "esp_now_send failed";
             sendJson(e);
         }
+    }
+    else if (strcmp(cmd, "badge_ota") == 0) {
+        // Funk-Update der Badges auslösen: Die App baut und signiert das vollständige Paket
+        // (der Schlüssel liegt nur dort und in den Badges); die Bridge prüft nur die Form und
+        // sendet es mehrfach. Die Badges leiten es selbst begrenzt weiter.
+        if (otaActive) {
+            sendErrorSeq(seq, "busy: ota");
+            return;
+        }
+        const char *b64 = doc["pkt"] | "";
+        uint8_t pkt[BADGE_OTA_PACKET_LEN + 8];
+        size_t n = 0;
+        if (mbedtls_base64_decode(pkt, sizeof(pkt), &n, (const unsigned char *)b64, strlen(b64)) != 0 ||
+            n != BADGE_OTA_PACKET_LEN || *(const uint32_t *)pkt != MAGIC_ID ||
+            pkt[offsetof(SyncPacket, mode)] != SYNC_MODE_BADGE_OTA) {
+            sendErrorSeq(seq, "bad badge_ota packet");
+            return;
+        }
+        bool ok = false;
+        for (int i = 0; i < BADGE_OTA_REPEATS; i++) {
+            if (i) delay(BADGE_OTA_GAP_MS);
+            ok |= (esp_now_send(broadcastMac, pkt, n) == ESP_OK);
+        }
+        if (ok) sendAck(seq);
+        else sendErrorSeq(seq, "esp_now_send failed");
     }
     else if (strcmp(cmd, "ota_begin") == 0) {
         handleOtaBegin(doc, seq);

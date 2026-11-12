@@ -1,8 +1,18 @@
 # Todo / Notizen (Projekt Herz-Schwarm)
 
-Stand: 2026-11-12 — Badge 1.6.0, Basisstation 0.4.2, Bridge 0.4.2, Nerves-App 0.2.2, Flash-Tooling 0.1.0 (Versionen aller Module: README → *Versionen aller Module*).
+Stand: 2026-11-12 — Badge 1.7.0, Basisstation 0.4.2, Bridge 0.5.0, Nerves-App 0.3.0, Flash-Tooling 0.1.0 (Versionen aller Module: README → *Versionen aller Module*).
 
 ## Offen
+
+- **Funk-Update der Badges am Gerät testen** (Badge 1.7.0 / Bridge 0.5.0 / App 0.3.0; bisher nur kompiliert
+  und in der CI geprüft). Reihenfolge: `ota_secret.h` anlegen, **zwei** Badges per USB mit 1.7.0 flashen,
+  Version im Sketch auf 1.7.1 erhöhen und bauen, `.bin` unter `/badge-update` ablegen, auslösen. Prüfen:
+  - beide Badges zeigen blau blinkend → blau füllend → grün und melden sich mit 1.7.1 zurück;
+  - Badge außerhalb der Bridge-Reichweite bekommt den Auslöser über ein anderes Badge;
+  - WLAN aus → rot, Neustart, altes Verhalten, derselbe Auslöser wird nicht erneut versucht;
+  - falscher `BADGE_OTA_KEY` in der App → kein Badge reagiert;
+  - Auslöser mit gleicher Version → kein Badge reagiert;
+  - mit allen Badges: verkraftet das WLAN 20+ gleichzeitige Downloads (sonst `OTA_JITTER_MS` erhöhen).
 
 - **1.6.0 / 0.4.2 / App 0.2.2 flashen und am Gerät prüfen** (bisher nur kompiliert, nichts geflasht;
   `mix test` lief nicht — kein Elixir auf dem Windows-Rechner):

@@ -15,7 +15,13 @@ defmodule HerzSchwarmWeb.Router do
 
     live "/", DashboardLive, :index
     live "/bridge-update", BridgeUpdateLive, :index
+    live "/badge-update", BadgeUpdateLive, :index
     live "/diagnose", DiagnoseLive, :index
+  end
+
+  # Funk-Update: die Badges holen sich hier ihre Firmware (kein Browser, keine Session).
+  scope "/firmware", HerzSchwarmWeb do
+    get "/badge.bin", FirmwareController, :badge
   end
 
   if Application.compile_env(:herz_schwarm, :dev_routes, false) do

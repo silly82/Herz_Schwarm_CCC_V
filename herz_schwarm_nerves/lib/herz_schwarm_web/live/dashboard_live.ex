@@ -79,6 +79,9 @@ defmodule HerzSchwarmWeb.DashboardLive do
           <.link navigate={~p"/bridge-update"} id="bridge-fw-link" class="badge badge-info">
             Bridge-FW {@bridge_fw || "?"}{bridge_ota_suffix(@bridge_ota)} &middot; Update
           </.link>
+          <.link navigate={~p"/badge-update"} id="badge-update-link" class="badge badge-info">
+            Badge-Update
+          </.link>
           <span class="badge badge-info">
             &#x1F4F1; Peers: {@peer_count}
           </span>

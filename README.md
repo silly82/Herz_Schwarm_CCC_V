@@ -192,6 +192,27 @@ python3 scripts/flash_gui.py               # TUI direkt starten
 | `/dev/cu.usbmodem1101` | `3c:0f:02:e4:61:00` |
 | `/dev/cu.usbmodem1101` | `a0:f2:62:ec:3c:c8` |
 
+### Funk-Update der Badges (OTA über WLAN, ab Badge 1.7.0 / Bridge 0.5.0 / App 0.3.0)
+
+Badges holen sich eine neue Firmware selbst per WLAN, ausgelöst über den Schwarm-Funk — kein USB-Kabel pro Badge. **Stand: kompiliert und in der CI geprüft, am Gerät noch nicht getestet** (siehe `todo.md`).
+
+**Einmalig einrichten:**
+
+1. `ota_secret.h.example` als `ota_secret.h` neben `Herz_Schwarm_CCC_V.ino` kopieren und alle drei Werte setzen: `OTA_WIFI_SSID`, `OTA_WIFI_PASS` (ein 2,4-GHz-WLAN, in dem der Rechner mit der App erreichbar ist) und `OTA_KEY` (langer zufälliger Text). Die Datei steht in `.gitignore`.
+2. Alle Badges **einmal per USB** mit dieser Firmware flashen. Ohne `ota_secret.h` wird der OTA-Code gar nicht mitkompiliert — im öffentlichen Repo gibt es bewusst keinen Standard-Schlüssel.
+3. Bridge auf 0.5.0 bringen (über `/bridge-update`).
+4. Die App mit der Umgebungsvariable `BADGE_OTA_KEY` starten — exakt derselbe Text wie `OTA_KEY`.
+
+**Update ausführen:**
+
+1. Firmware mit erhöhter Version und derselben `ota_secret.h` bauen: `arduino-cli compile --fqbn esp32:esp32:esp32s3 --build-path build_ota .` → `build_ota/Herz_Schwarm_CCC_V.ino.bin`.
+2. In der App die Seite **`/badge-update`** öffnen, die `.bin` ablegen. Die App liest Version (Marker `HERZFW:x.y.z;` im Binary), Größe und MD5.
+3. Adresse des App-Rechners im Badge-WLAN und Port (Standard 4000) prüfen, **„Update an alle Badges senden"**.
+
+**Was die Badges tun:** Jedes Badge prüft den Auslöser (Modus `13`, HMAC-SHA256 mit `OTA_KEY`), leitet ihn begrenzt weiter (3×) und aktualisiert sich nur, wenn die Zielversion **neuer** ist als die eigene. Nach einer zufälligen Wartezeit (0,5–6,5 s, damit nicht alle gleichzeitig laden) verlässt es den Schwarm-Funk, meldet sich am WLAN an, lädt `http://<Adresse>:<Port>/firmware/badge.bin`, prüft Größe und MD5 und startet neu. Anzeige: **blau blinkend** = sucht WLAN, **blau füllend** = lädt, **grün** = fertig, **rot** = fehlgeschlagen. Auch nach einem Fehler startet das Badge neu und läuft mit der alten Firmware weiter; denselben Auslöser versucht es nicht noch einmal, erst einen neuen.
+
+**Grenzen:** Eine Firmware, die ohne `ota_secret.h` gebaut wurde, lässt sich per Funk einspielen, kann danach aber selbst kein Funk-Update mehr (dann wieder USB). Die Binärdatei aus der CI ist deshalb keine Update-Datei. Gleiche oder ältere Versionen werden abgelehnt — zum Testen die Version erhöhen. Die Basisstation kann das Update nicht auslösen, nur App + Bridge. Wer einen echten Auslöser mitschneidet, kann ihn erneut senden: Badges mit älterer Version versuchen dann das Update, scheitern ohne erreichbaren Server und sind dafür etwa 25 s aus dem Schwarm — eine fremde Firmware lässt sich so nicht einspielen (MD5 im signierten Auslöser).
+
 ### Serial-Debug & Morse-Logging
 - **Aktivierung:** Im Sketch `ENABLE_SERIAL_DEBUG` auf `1` setzen *oder* beim Kompilieren `-DENABLE_SERIAL_DEBUG=1` wie oben.
 - **Aus:** Standard im Sketch ist `0` — dann gibt es **keinen** Serial-Code in der Hauptschleife (kein Einfluss auf die Animation).
@@ -226,7 +247,7 @@ scripts/version.sh tag            # annotierten Tag setzen
 
 **Beispiel:** Code-Stand ist `1.2.0`, seit `v1.2.0.0` gab es 5 Commits → Tag `v1.2.0.5`. Nach Merge in `main` und Diskussion über ein neues Feature wird C auf `1` gesetzt → `1.2.1` → nächster Tag wird `v1.2.1.0`. Bump auf `1.3.0` (großes Feature) → C wieder auf `0` → `v1.3.0.0`. Bump auf `2.0.0` (Breaking Change) → kompletter Reset.
 
-**Aktueller Stand:** `1.6.0` (neu: die Nähe steuert nur noch die Helligkeit und meint das nächste Badge statt des Durchschnitts, das Tempo ist je Modus fest; ferngesteuerte Effekte mit fester Helligkeit; der Morse-Virus endet nach 3 s; „Alle stoppen" mit Kennung. 1.5.1: echtes 50-Hz-Frame-Raster und 20-Hz-Sync — vorher zählte die Arbeitszeit des Frames nicht mit, effektiv ~44 Hz / ~15 Hz; Basisstation und Bridge zählen nicht mehr als Peer; Regenbogen-Farbton läuft über den Schwarm-Takt und ist damit zwischen Badges synchron. 1.5.0: alle visuellen Effekte laufen endlos bis Stopp bzw. bis ein neuer Effekt sie ersetzt; Tap-Meldung via BOOT-Taste (Modus `11`) und globaler Stopp (Modus `12`)) — letzter Tag `v1.3.0.0`. Versionen aller Module: siehe *Versionen aller Module*.
+**Aktueller Stand:** `1.7.0` (neu: Funk-Update über WLAN, Modus `13`, siehe *Funk-Update der Badges*. 1.6.0: die Nähe steuert nur noch die Helligkeit und meint das nächste Badge statt des Durchschnitts, das Tempo ist je Modus fest; ferngesteuerte Effekte mit fester Helligkeit; der Morse-Virus endet nach 3 s; „Alle stoppen" mit Kennung. 1.5.1: echtes 50-Hz-Frame-Raster und 20-Hz-Sync — vorher zählte die Arbeitszeit des Frames nicht mit, effektiv ~44 Hz / ~15 Hz; Basisstation und Bridge zählen nicht mehr als Peer; Regenbogen-Farbton läuft über den Schwarm-Takt und ist damit zwischen Badges synchron. 1.5.0: alle visuellen Effekte laufen endlos bis Stopp bzw. bis ein neuer Effekt sie ersetzt; Tap-Meldung via BOOT-Taste (Modus `11`) und globaler Stopp (Modus `12`)) — letzter Tag `v1.3.0.0`. Versionen aller Module: siehe *Versionen aller Module*.
 
 **Änderungen v1.1.0 (Performance-Optimierung):**
 - `String` → `char[12]` für Morse-Puffer (kein Heap-Overhead)
@@ -249,10 +270,10 @@ Das A.B.C.D-Schema oben beschreibt **nur die Badge-Firmware** (`Herz_Schwarm_CCC
 
 | Modul | Datei | Define/Feld | Aktuell |
 |-------|-------|-------------|---------|
-| Badge (Schwarm) | `Herz_Schwarm_CCC_V.ino` | `FW_VERSION_MAJOR/MINOR/PATCH` | 1.6.0 |
+| Badge (Schwarm) | `Herz_Schwarm_CCC_V.ino` | `FW_VERSION_MAJOR/MINOR/PATCH` | 1.7.0 |
 | Basisstation | `Herz_Schwarm_BaseStation/Herz_Schwarm_BaseStation.ino` | `BASESTATION_FW_MAJOR/MINOR/PATCH` | 0.4.2 |
-| Bridge (Nerves-Adapter) | `herz_schwarm_nerves/firmware/esp32_bridge/esp32_bridge.ino` | `BRIDGE_FW_MAJOR/MINOR/PATCH` | 0.4.2 |
-| Nerves/Phoenix-App | `herz_schwarm_nerves/mix.exs` | `@version` | 0.2.2 |
+| Bridge (Nerves-Adapter) | `herz_schwarm_nerves/firmware/esp32_bridge/esp32_bridge.ino` | `BRIDGE_FW_MAJOR/MINOR/PATCH` | 0.5.0 |
+| Nerves/Phoenix-App | `herz_schwarm_nerves/mix.exs` | `@version` | 0.3.0 |
 | Flash-Tooling (Python) | `scripts/flashlib/__init__.py` | `__version__` | 0.1.0 |
 
 Jedes Modul wird unabhängig gebaut, geflasht bzw. deployed — eine einzige globale Versionsnummer für alles ist bewusst nicht das Ziel. `scripts/version.sh all` zeigt den aktuellen Stand aller fünf; `scripts/version.sh tag` schreibt sie als Snapshot in die Tag-Message des `vA.B.C.D`-Releases (D bleibt reiner Git-Commit-Zähler seit dem letzten `vA.B.C`-Tag, repo-weit — nicht auf Badge-Änderungen beschränkt).

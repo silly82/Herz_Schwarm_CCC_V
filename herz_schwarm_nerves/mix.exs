@@ -2,7 +2,7 @@ defmodule HerzSchwarm.MixProject do
   use Mix.Project
 
   @app :herz_schwarm
-  @version "0.2.2"
+  @version "0.3.0"
 
   def project do
     [
@@ -26,7 +26,7 @@ defmodule HerzSchwarm.MixProject do
   def application do
     [
       mod: {HerzSchwarm.Application, []},
-      extra_applications: [:logger, :runtime_tools]
+      extra_applications: [:logger, :runtime_tools, :crypto]
     ]
   end
 
