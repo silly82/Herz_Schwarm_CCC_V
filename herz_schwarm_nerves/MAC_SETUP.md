@@ -1,6 +1,10 @@
-# Nerves-Controller auf macOS starten (Development)
+# Nerves-Controller: Entwicklung auf macOS und Betrieb auf dem Raspberry Pi
 
-Der Nerves-Controller ist für **Raspberry Pi 4** als Nerves-Firmware-Image gedacht. Du kannst die gleiche Code-Basis aber **auf dem Mac als normale Elixir/Phoenix-App** laufen lassen — ohne Nerves-Build, ohne SD-Karte. Das ist ideal zum Entwickeln und Testen der Web-UI.
+Stand: App 0.3.0, Bridge 0.5.0.
+
+Der Nerves-Controller ist als Nerves-Firmware-Image für **Raspberry Pi 4** angelegt. Dieselbe Code-Basis läuft aber als **normale Elixir/Phoenix-App** — auf dem Mac zum Entwickeln und Testen der Web-UI, auf dem Pi im Betrieb (systemd-Dienst, ohne Nerves-Build, ohne SD-Karten-Image).
+
+Inhalt: Einrichtung auf dem Mac · Bridge flashen · Port-Auswahl und Web-UI · Bridge-Protokoll (Ack, Peers, Taps) · Bridge-Update (`/bridge-update`) · Badge-Update per Funk (`/badge-update`) · Betrieb auf dem Raspberry Pi · Tests · Troubleshooting · Bekannte Bugs.
 
 ## Voraussetzungen (einmalig)
 
@@ -12,22 +16,25 @@ brew install elixir
 brew install asdf
 asdf plugin add erlang
 asdf plugin add elixir
-asdf install erlang 26.2.5
-asdf install elixir 1.17.0
-asdf global erlang 26.2.5
-asdf global elixir 1.17.0
+cd herz_schwarm_nerves
+asdf install          # nimmt die Versionen aus .tool-versions (Elixir 1.15.4 / OTP 26.2)
 ```
+
+Das Projekt verlangt Elixir `~> 1.15`; neuere Versionen gehen ebenfalls (auf dem Pi laufen Elixir 1.18 / OTP 27). Die CI testet mit den Versionen aus `.tool-versions`.
 
 Prüfen:
 ```bash
 elixir --version
-# Elixir 1.17.0 (compiled with Erlang/OTP 26)
+# Elixir 1.15.4 (compiled with Erlang/OTP 26)
+
+# Einmalig: ohne dieses Archiv schlägt jedes mix-Kommando fehl (mix.exs deklariert es)
+mix archive.install hex nerves_bootstrap "~> 1.13" --force
 ```
 
 ## Setup (einmalig pro Repo)
 
 ```bash
-cd /Users/silvanwalker/Documents/Arduino/Herz_Schwarm_CCC_V/herz_schwarm_nerves
+cd <Repo>/herz_schwarm_nerves
 
 # Dependencies laden (Phoenix, LiveView, circuits_uart, ...)
 mix deps.get
@@ -70,33 +77,6 @@ UART_DEVICE=/dev/cu.usbmodem14101 mix phx.server
 
 Browser: `http://localhost:4000`
 
-## UART-Device auf Mac
-
-ESP32-Bridge erscheint als USB-Serial-Gerät. Mögliche Pfade:
-
-| Pfad | Typischer Chip |
-|------|----------------|
-| `/dev/cu.usbserial-1410` | ESP32-S3 native USB-CDC |
-| `/dev/cu.usbmodem14101` | ESP32 mit CH340 USB-Serial |
-| `/dev/cu.SLAB_USBtoUART` | ESP32 mit CP210x |
-| `/dev/cu.wchusbserial*` | ESP32 mit CH340 (chinesische Boards) |
-
-**Finden:**
-```bash
-ls -la /dev/cu.usb* /dev/cu.wch* /dev/cu.SLAB* 2>/dev/null
-# oder
-ioreg -p IOUSB -l | grep -i "usb serial\|usb-serial"
-```
-
-**Port-Auswahl** (ab App 0.1.2):
-Die Bridge wird zur Laufzeit erkannt (`lib/herz_schwarm/bridge.ex`, bei jedem (Re-)Connect neu):
-1. `UART_DEVICE` env-var (höchste Priorität)
-2. `config :herz_schwarm, :uart_device` (standardmäßig nicht gesetzt)
-3. Auto-Detect: alle USB-Seriell-Ports von Espressif / CP210x / CH340 / FTDI werden der Reihe nach
-   mit `{"cmd":"status"}` angefragt; der erste, der mit `pong` antwortet, ist die Bridge.
-   Badges/Basisstation am selben Rechner antworten nicht und werden übersprungen.
-   Nichts gefunden → Warnung im Log, neuer Versuch mit Backoff (2 s … 30 s).
-
 ## Was die App auf dem Mac macht
 
 | Komponente | Verhalten auf Mac |
@@ -108,76 +88,6 @@ Die Bridge wird zur Laufzeit erkannt (`lib/herz_schwarm/bridge.ex`, bei jedem (R
 | LiveView Web-UI | `http://localhost:4000` |
 
 **Effekte gehen über die USB-Bridge per JSON raus** → Bridge sendet ESP-NOW-Broadcast auf Kanal 13 → alle Badges empfangen das. **Gleicher Kanal wie die ESP32-S3-Basisstation** — sie koexistieren (beide senden `magic_id = 0x421337CC`).
-
-## Coexistenz mit der ESP32-S3-Basisstation
-
-| Komponente | Kanal | Wer? |
-|------------|-------|------|
-| Basisstation (ESP32-S3+W5500) | 13 | hört passiv, sendet bei Effekt-Trigger |
-| Nerves-Bridge (ESP32+Mac) | 13 | hört passiv, sendet bei Effekt-Trigger |
-| Badges | 13 | hören passiv auf beide |
-
-**Mögliches Problem:** Wenn beide Stationen gleichzeitig senden, Race auf `virusID` (zufällig, sollte kollisionsfrei sein). Wenn beide gleichzeitig ein Heartbeat-SyncPacket senden, wird eines das andere überschreiben. **In der Praxis kein Problem** weil:
-1. Badges senden Heartbeats, Stationen nicht
-2. Effekte sind manuelle Trigger, koordiniert via Mensch
-
-**Wenn Probleme:** Eine Station deaktivieren (z. B. Web-UI der ESP32-S3-Basisstation nicht benutzen, nur Nerves verwenden, oder umgekehrt).
-
-## Tests / IEx
-
-```bash
-# IEx-Konsole mit geladener App
-iex -S mix phx.server
-
-# Im IEx:
-alias HerzSchwarm.{Bridge, EffectEngine, PeerTracker}
-Bridge.connected?()
-EffectEngine.trigger_effect(5)  # Beat
-EffectEngine.set_bpm(120)
-EffectEngine.stop_all()
-```
-
-## Was NICHT funktioniert auf Mac
-
-- **Nerves-Firmware-Build** (`mix firmware`, `mix burn`) — das geht nur mit `MIX_TARGET=rpi4` und cross-compile. Auf Mac nicht versuchen.
-- **Nerves-Pack** — gleiche Einschränkung.
-
-## Production-Build (für Raspberry Pi)
-
-```bash
-export MIX_TARGET=rpi4
-mix deps.get
-mix firmware
-# → ./_build/rpi4/dev/nerves/images/herz_schwarm.fw
-```
-
-Image auf SD-Karte flashen:
-```bash
-mix burn
-# SD-Karte einlegen, warten bis fertig
-```
-
-Aber: **dieser Workflow ist hier selten nötig** — der Mac als Host reicht für Dev + Test, die ESP32-S3+W5500-Variante ist im Produktiv-Einsatz bewährt.
-
-## Troubleshooting
-
-### `mix deps.get` schlägt fehl
-- Hex-Version prüfen: `mix hex.info`
-- Repo: `mix hex.repo remove hex; mix hex.repo add hex https://repo.hex.pm`
-
-### `mix phx.server` zeigt nichts im Browser
-- `check_origin: false` ist in `dev.exs` gesetzt — sollte gehen
-- Firewall: `sudo /usr/libexec/ApplicationFirewall/socketfilterfw --add /usr/local/bin/elixir`
-- `http://127.0.0.1:4000` statt `localhost` versuchen
-
-### UART-Bridge verbindet nicht
-- `ls /dev/cu.*` zeigt das Device?
-- ESP32-Bridge-Sketch korrekt geflasht? (115200 Baud, newline JSON)
-- Anderen Port versuchen: `UART_DEVICE=/dev/cu.usbmodem14101 mix phx.server`
-
-### `circuits_uart` Permission denied
-- macOS: `sudo chmod 666 /dev/cu.usbserial-1410` (für Dev)
-- Oder User zu `dialout`-Gruppe hinzufügen (Linux, nicht macOS-relevant)
 
 ## Architecture-Diagram
 
@@ -277,7 +187,7 @@ pip3 install --user pyserial
 
 - **ROM-Bootloader (PID 0x1001)**: Wenn das C6 im Download-Mode hängt, USB-Cabel kurz ziehen + Reset-Taste drücken
 - **USB-CDC-Reset beim Serial-Open**: XIAO C6 hat das **nicht** (im Gegensatz zu ESP32-C3)
-- **Channel 13** für ESP-NOW: Kanal ist in `esp32_bridge.ino` fest verdrahtet, MAC `0x421337CC`
+- **Channel 13** für ESP-NOW: Kanal ist in `esp32_bridge.ino` fest verdrahtet, Magic-ID `0x421337CC`
 
 ### ESP32-C3 flashen (die Bridge am Raspberry Pi)
 
@@ -320,24 +230,9 @@ Die tatsächlichen Dateinamen im Build-Verzeichnis heißen `esp32_bridge.ino.boo
 **Hinweis:** Wurde die bereits laufende Bridge mit einem Schema **ohne** zweiten App-Slot geflasht, schlägt
 OTA fehl (`Update.begin`, siehe „Bridge-Update über das Dashboard") — für Updates bleibt dann nur USB.
 
-## App starten auf Mac
+## Port-Auswahl und Web-UI
 
-### Erste Schritte
-
-```bash
-cd herz_schwarm_nerves
-
-# Dependencies
-mix deps.get
-
-# Compile (einmalig oder nach Code-Änderungen)
-mix compile
-
-# App starten
-UART_DEVICE=/dev/cu.usbmodem101 mix phx.server
-```
-
-### Auto-Detect (alternativ, ohne env-var)
+### Port-Auswahl (ab App 0.1.2)
 
 Die Bridge wird zur Laufzeit erkannt (`lib/herz_schwarm/bridge.ex`, bei jedem (Re-)Connect neu):
 1. `UART_DEVICE` env-var (höchste Priorität)
@@ -364,7 +259,9 @@ UART_DEVICE=/dev/cu.usbmodem14101 mix phx.server
 - Bridge-Status + Peer-Count in Header
 - Ab App 0.2.0: Header zeigt die Bridge-Firmware-Version (aus `pong`, bei Bridge < 0.3.0 `?`) und verlinkt die Seite **`/bridge-update`** (siehe „Bridge-Update über das Dashboard“)
 - Ab App 0.2.0 / Bridge 0.4.0: Karte **Tap-Counter** — Gesamtsumme und Wert je Badge, mit Reset
-- Knopf **„Alle Effekte auf den Badges stoppen“** (sendet Modus 12)
+- Knopf **„Alle Effekte auf den Badges stoppen“** (sendet Modus 12, ab App 0.2.2 / Bridge 0.4.2 mit eigener Kennung je Stopp)
+- Ab App 0.3.0 / Bridge 0.5.0: Link zur Seite **`/badge-update`** (siehe „Badge-Update per Funk“)
+- Seite **`/diagnose`**: Zähler, Bridge-Uptime/Heap, Log-Filter, RSSI-Verlauf der Badges
 - Effekte laufen **endlos**, bis gestoppt wird. Beat ist ein 150-ms-Puls, „Badge finden“ (Identify) blinkt 10 s grün
 - **Stolperstein:** BPM-Slider und Ambient-Farbwähler müssen **innerhalb** eines Formulars gebunden sein
   (`form`/`field` mit `phx-change`) — LiveView feuert `phx-change` auf Einzel-Inputs nicht, ohne Formular
@@ -376,11 +273,10 @@ ESP32-Bridge erscheint als USB-Serial-Gerät. Mögliche Pfade:
 
 | Pfad | Board | Hinweis |
 |------|-------|---------|
-| `/dev/cu.usbserial-1410` | ESP32-S3 native USB | **bevorzugt** für S3 |
-| `/dev/cu.SLAB_USBtoUART` | ESP32 mit CP210x | zuverlässig |
-| `/dev/cu.usbmodem14xxx` | ESP32 mit CH340/CH341 | häufigste China-Boards |
-| `/dev/cu.wchusbserial*` | ESP32 mit CH340 (WCH-IC) | alternative Bezeichnung |
-| `/dev/cu.usbmodem*` | XIAO ESP32C6 native USB-C | **für C6** |
+| `/dev/cu.usbmodem*` | natives USB (ESP32-S3, ESP32-C3, XIAO ESP32-C6) | Nummer ändert sich je USB-Buchse |
+| `/dev/cu.usbserial-*` | ESP32 mit USB-Seriell-Wandler (CH340, CP210x, FTDI) | je nach Treiber |
+| `/dev/cu.SLAB_USBtoUART` | ESP32 mit CP210x (Silicon-Labs-Treiber) | |
+| `/dev/cu.wchusbserial*` | ESP32 mit CH340 (WCH-Treiber) | alternative Bezeichnung |
 
 **Finden:**
 ```bash
@@ -392,7 +288,7 @@ ioreg -p IOUSB -l | grep -i "usb serial\|usb-serial"
 ## Wichtige Constraints
 
 - **macOS first** (GallifreyM1), Linux secondary (x86_64)
-- **Windows**: nicht in flashlib v0.1.0 (geplant v0.2.0 — eigener Versions-Track des Flash-Tools, siehe unten)
+- **Windows**: TUI-Flasher ab flashlib v0.2.0 (`python scriptslash_gui.py`); das Bash-Skript bleibt macOS/Linux
 - **Effekt-Steuerung läuft NUR über diese Web-UI** (oder Basisstation), nie im TUI-Flasher
 - **Version**: `Herz_Schwarm_CCC_V.ino` Defines sind nur für die Badge-FW + den `vA.B.C.D`-Git-Tag maßgeblich. Basisstation/Bridge/Nerves-App/flashlib versionieren sich unabhängig — vollständige Tabelle in `../README.md` (Abschnitt "Versionen aller Module")
 - **Logs append-only**: `firmware_update_log.csv`/`.md` werden nie überschrieben
@@ -405,9 +301,11 @@ ioreg -p IOUSB -l | grep -i "usb serial\|usb-serial"
 | Nerves-Bridge (ESP32-C6) | 13 | hört passiv, sendet bei Effekt-Trigger |
 | Badges | 13 | hören passiv auf beide |
 
-**Mögliches Problem:** Wenn beide Stationen gleichzeitig senden, Race auf `virusID` (zufällig, sollte kollisionsfrei sein). Wenn beide gleichzeitig ein Heartbeat-SyncPacket senden, wird eines das andere überschreiben. **In der Praxis kein Problem** weil:
-1. Badges senden Heartbeats, Stationen nicht
-2. Effekte sind manuelle Trigger, koordiniert via Mensch
+**Zusammenspiel:**
+1. Beide Stationen vergeben zufällige `virusID`s oberhalb von 99999 (der Bereich 1…99999 gehört dem Morse-Virus der Badges, ab Basisstation/Bridge 0.4.2 und App 0.2.2). Eine Kollision ist damit unwahrscheinlich.
+2. Starten beide gleichzeitig einen Effekt, gewinnt auf jedem Badge der zuletzt empfangene („letzter Effekt gewinnt").
+3. Stationen senden mit Hauptversion 0. Badges zählen sie nicht als Peer und nicht für den Takt; Basisstation und Bridge führen sich gegenseitig nicht in der Badge-Liste (ab 0.4.1).
+4. Das Funk-Update der Badges kann nur die App über die Bridge auslösen, nicht die Basisstation.
 
 **Wenn Probleme:** Eine Station deaktivieren (z. B. Web-UI der ESP32-S3-Basisstation nicht benutzen, nur Nerves verwenden, oder umgekehrt).
 
@@ -464,7 +362,12 @@ Bleiben Chunks/Kommandos aus, verwirft die Bridge ein verwaistes Update nach **3
 
 **Bekannte Grenzen:** keine eigene Prüfsumme pro Chunk — die Integrität prüft `Update.end` über die
 Image-Prüfsumme; die Dateiprüfung der App akzeptiert nur `.bin` mit ESP-Magic-Byte `0xE9`; der reale
-OTA-Ablauf auf Hardware ist noch nicht getestet (Stand 0.3.0).
+OTA-Ablauf auf Hardware ist noch nicht getestet (Stand Bridge 0.5.0).
+
+**Funk-Update der Badges auslösen (ab Bridge 0.5.0):**
+`{"cmd":"badge_ota","seq":51,"pkt":"<base64, 54 Byte>"}` — das fertige, von der App signierte Auslösepaket
+(Modus 13). Die Bridge prüft nur Länge, Magic-ID und Modus, sendet das Paket 3× per ESP-NOW und antwortet mit
+`ack`; den Schlüssel kennt sie nicht. Während eines Bridge-Updates antwortet sie mit `err` `busy: ota`.
 
 ## Bridge-Update über das Dashboard (`/bridge-update`, ab App 0.2.0 / Bridge 0.3.0)
 
@@ -502,6 +405,42 @@ kann eine Bridge-Firmware hochladen und flashen. Die App nur in einem vertrauens
 oder den Zugriff auf Netzwerkebene beschränken (Firewall/VPN/LAN-Segment); einen Login gibt es bewusst
 noch nicht — im Gegensatz zur OTA der Basisstation, die HTTP Basic Auth nutzt.
 
+## Badge-Update per Funk (`/badge-update`, ab App 0.3.0 / Bridge 0.5.0 / Badge 1.7.0)
+
+Die Badges laden ihre Firmware selbst per WLAN von der App; die App löst das über die Bridge per Schwarm-Funk
+aus. **Stand: in der CI getestet, am Gerät noch nicht.** Ablauf aus Sicht der Badges, Einrichtung von
+`ota_secret.h` und Grenzen: `../README.md` → *Funk-Update der Badges*.
+
+**Voraussetzungen auf der App-Seite:**
+- Umgebungsvariable `BADGE_OTA_KEY` — exakt derselbe Text wie `OTA_KEY` in der `ota_secret.h` der Badges
+  (alternativ `config :herz_schwarm, :badge_ota_key`). Ohne Schlüssel zeigt die Seite einen Hinweis und sendet nichts.
+- Bridge-Firmware ≥ 0.5.0 (kennt das Kommando `badge_ota`).
+- Die Badges müssen den App-Rechner in ihrem Update-WLAN unter der angegebenen Adresse und dem Port erreichen.
+
+**Datei:** die Badge-`.bin` aus einem Build **mit** `ota_secret.h`
+(`arduino-cli compile --fqbn esp32:esp32:esp32s3 --build-path build_ota .` →
+`build_ota/Herz_Schwarm_CCC_V.ino.bin`). Geprüft werden Endung `.bin`, ESP-Magic-Byte `0xE9`, höchstens
+1 310 720 Byte (App-Slot der Badges) und der Versions-Marker `HERZFW:x.y.z;` im Binary — fehlt er, lehnt die App
+die Datei ab. Die Datei liegt danach als `badge.bin` im Verzeichnis `:badge_ota_dir`
+(Standard `~/.local/share/herz-schwarm`) und bleibt über einen Neustart der App erhalten.
+
+**Ablauf:** Datei ablegen → die Seite zeigt Version, Größe und MD5 → Adresse (Vorschlag: die eigenen
+IPv4-Adressen des Rechners) und Port (Standard 4000) prüfen → „Update an alle Badges senden“. Die App baut das
+54-Byte-Paket, signiert es (HMAC-SHA256, auf 8 Byte gekürzt) und schickt es als `badge_ota` an die Bridge. Die
+Badges holen die Datei dann unter `GET /firmware/badge.bin`.
+
+**Im IEx:**
+```elixir
+HerzSchwarm.BadgeOta.info()                              # abgelegte Firmware oder nil
+HerzSchwarm.BadgeOta.key_configured?()                   # Schlüssel gesetzt?
+HerzSchwarm.BadgeOta.trigger({192, 168, 4, 10}, 4000)    # Auslöser senden
+```
+
+**⚠️ Sicherheitshinweis:** Auch diese Seite hat keinen Login. Wer die App erreicht, kann eine Datei ablegen
+und ein Update auslösen — die App signiert mit dem hinterlegten Schlüssel. Außerdem ist `/firmware/badge.bin`
+für jeden im Netz abrufbar, und die Datei enthält WLAN-Passwort und `OTA_KEY` der Badges im Klartext. Die App
+deshalb nur in einem vertrauenswürdigen Netz betreiben.
+
 ## Production-Build (für Raspberry Pi 4)
 
 ```bash
@@ -517,7 +456,7 @@ mix burn
 # SD-Karte einlegen, warten bis fertig
 ```
 
-Aber: **dieser Workflow ist hier selten nötig** — der Mac als Host reicht für Dev + Test, die ESP32-S3+W5500-Variante ist im Produktiv-Einsatz bewährt.
+Aber: **dieser Workflow wird derzeit nicht genutzt** — der Mac reicht für Entwicklung und Test, und im Betrieb läuft die App als normale Phoenix-App auf Raspberry Pi OS (nächster Abschnitt).
 
 ## Betrieb auf dem Raspberry Pi (ohne Nerves)
 
@@ -566,6 +505,8 @@ mix assets.deploy    # Tailwind/Esbuild laden dabei ihre linux-arm64-Binaries
 SECRET_KEY_BASE=<lang — z. B. erzeugt mit: MIX_ENV=prod mix phx.gen.secret>
 PHX_HOST=<Pi-IP>
 PORT=4000
+# nur für das Funk-Update der Badges: derselbe Text wie OTA_KEY in der ota_secret.h der Badges
+BADGE_OTA_KEY=<langer zufälliger Schlüssel>
 ```
 
 ### 5. systemd-Unit
@@ -621,6 +562,10 @@ sudo systemctl restart herz-schwarm
 | `http://<Pi-IP>:4000/` | Dashboard (Effekte, Tap-Counter) |
 | `http://<Pi-IP>:4000/diagnose` | Monitoring / Diagnose |
 | `http://<Pi-IP>:4000/bridge-update` | Bridge-OTA über UART |
+| `http://<Pi-IP>:4000/badge-update` | Funk-Update der Badges auslösen |
+| `http://<Pi-IP>:4000/firmware/badge.bin` | abgelegte Badge-Firmware (laden die Badges beim Funk-Update) |
+
+Daten der App liegen unter `~/.local/share/herz-schwarm/` (`taps.json`, `badge.bin`).
 
 ## Tests / IEx
 
@@ -635,6 +580,8 @@ EffectEngine.trigger_effect(5)  # Beat
 EffectEngine.set_bpm(120)
 EffectEngine.stop_all()
 ```
+
+Automatische Tests: `mix test` (läuft ohne Bridge und ohne Hardware; in der CI bei jedem Push und Pull Request).
 
 ## Was NICHT funktioniert auf Mac
 
@@ -674,7 +621,18 @@ EffectEngine.stop_all()
 - **Port verschwindet zwischen Runs**: Mac-USB-Energie-Management, USB-Hub mit eigener Stromversorgung verwenden
 - **C6 antwortet nicht auf JSON**: Baud-Rate prüfen (115200), Boot-Message "bridge ready" sollte kommen
 
-## Bekannte Bugs (Stand App 0.2.0 / Bridge 0.4.0)
+## Bekannte Bugs (Stand App 0.3.0 / Bridge 0.5.0)
+
+Offen: **Bandit 1.12.5** — HTTP/2-Advisory EEF-CVE-2026-105659 ist ungefixt, deshalb ist HTTP/2 in
+`config/config.exs` abgeschaltet (`http_2_options: [enabled: false]`). Bei einem Fix Bandit aktualisieren und
+die Zeile entfernen.
+
+Noch nicht am Gerät getestet: Bridge-OTA über `/bridge-update`, Funk-Update der Badges über `/badge-update`
+(Prüfpunkte in `../todo.md`).
+
+Geändert in App 0.2.1 / 0.2.2: Beat-Takt läuft auf einem festen Raster (kein Wegdriften mehr); Effekt-Kennungen
+sind zufällig im Bereich 100001…2³²−1 statt eines Zählers, der nach einem Neustart wieder von vorn begann;
+„Alle stoppen“ trägt eine eigene Kennung.
 
 Behoben ab App 0.2.0 / Bridge 0.4.0 / Badge 1.5.0: BPM-Slider und Ambient-Farbwähler änderten nichts an den
 Effekten (`phx-change` feuert auf Einzel-Inputs nur innerhalb eines Formulars — die Regler sind jetzt in

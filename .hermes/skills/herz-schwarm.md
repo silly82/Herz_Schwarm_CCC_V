@@ -1,10 +1,10 @@
 ---
 name: herz-schwarm
 description: "Herz-Schwarm CCC — ESP32-S3 LED-Badge-Schwarm (Firmware, TUI-Flasher, Versionsschema, Build-Pfade). Load when working on Herz_Schwarm_CCC_V repo, flashing badges, TUI tooling, or A.B.C.D versioning."
-version: 1.2.0
+version: 1.3.0
 author: silly82 (Silvan)
 license: MIT
-platforms: [macos, linux]
+platforms: [macos, linux, windows]
 metadata:
   hermes:
     tags: [esp32, arduino, herz-schwarm, ccc, led-badge, swarm, esp-now, version, tui, pyserial, arduino-cli]
@@ -14,14 +14,20 @@ metadata:
 # Herz-Schwarm CCC — Repo Skill
 
 Synchronisierter LED-Badge-Schwarm für CCC (Waveshare ESP32-S3-Matrix).
-ESP-NOW-basiert, Kanal 13, MAGIC_ID `0x421337CC`, 8x8 GRB-Matrix auf GPIO 14,
-BOOT-Button auf GPIO 0. Beinhaltet: Badge-Firmware, Basisstation (ESP32-S3 +
-W5500), Nerves-Controller (Elixir/Phoenix), TUI-Flasher (Python).
+ESP-NOW-basiert, Kanal 13, MAGIC_ID `0x421337CC`, 8x8 RGB-Matrix auf GPIO 14,
+BOOT-Button auf GPIO 0, Bewegungssensor QMI8658 an GPIO 11/12. Beinhaltet:
+Badge-Firmware, Basisstation (ESP32-S3 + W5500), Nerves-Controller
+(Elixir/Phoenix) mit USB-Bridge, TUI-Flasher (Python).
+
+Stand 2026-11-12: Badge 1.8.0, Basisstation 0.4.2, Bridge 0.5.0, App 0.3.0,
+Flash-Tooling 0.2.0. Maßgeblich sind `README.md` (Funktionen, Protokoll,
+Versionen) und `todo.md` (offene Punkte, Tests am Gerät). Badge 1.5.1–1.8.0
+sind kompiliert und in der CI geprüft, aber noch nicht am Gerät getestet.
 
 ## Quick-Start für AI-Agents
 
 ```bash
-cd /Users/silvanwalker/Documents/Arduino/Herz_Schwarm_CCC_V
+cd <Repo-Wurzel>   # z. B. ~/Documents/Arduino/Herz_Schwarm_CCC_V
 
 # Versionsschema A.B.C.D siehe unten
 ./scripts/version.sh current          # aktuelle A.B.C aus .ino (Badge)
@@ -35,11 +41,29 @@ python3 scripts/flash_gui.py
 ./scripts/batch_flash_herz_schwarm.sh
 
 # Tests
-cd scripts && python3 -m pytest flashlib/tests/ -v   # 25/25 gruen
+cd scripts && python3 -m pytest flashlib/tests/ -v   # 41/41 gruen
 
-# Build verifizieren
-arduino-cli compile --fqbn esp32:esp32:esp32s3:CDCOnBoot=cdc --build-path build_basestation .
+# Build verifizieren (Badge; Basisstation/Bridge ohne --fqbn, Optionen aus sketch.yaml)
+arduino-cli compile --fqbn esp32:esp32:esp32s3 .
+arduino-cli compile Herz_Schwarm_BaseStation
+arduino-cli compile herz_schwarm_nerves/firmware/esp32_bridge
 ```
+
+## CI
+
+`.github/workflows/ci.yml` läuft bei Push auf `main`, Pull Requests und per
+`gh workflow run ci.yml --ref <branch>`: kompiliert Badge (Release, Debug, mit
+Funk-Update), Basisstation, Bridge; `pytest` für `scripts/`; `mix test` für die
+App. Versionen von ESP32-Core und Libraries sind dort festgenagelt.
+
+## Geheimnisse (nie committen)
+
+- `ota_secret.h` im Repo-Root: WLAN-Zugang und `OTA_KEY` für das Funk-Update
+  der Badges (Vorlage `ota_secret.h.example`). Ohne die Datei baut die Firmware
+  ohne Funk-Update.
+- `Herz_Schwarm_BaseStation/ota_secret.h`: OTA-Passwort der Basisstation.
+- `build_ota/`: Badge-Binärdatei mit eingebetteten Geheimnissen.
+- App: Umgebungsvariable `BADGE_OTA_KEY` (derselbe Text wie `OTA_KEY`).
 
 ## Versionsschema A.B.C.D (seit v1.2.0)
 
@@ -70,7 +94,7 @@ als Snapshot (`scripts/version.sh all`), nicht nur A.B.C der Badge-FW.
 | Basisstation | `Herz_Schwarm_BaseStation/Herz_Schwarm_BaseStation.ino` | `BASESTATION_FW_MAJOR/MINOR/PATCH` | eigener Zähler |
 | Bridge | `herz_schwarm_nerves/firmware/esp32_bridge/esp32_bridge.ino` | `BRIDGE_FW_MAJOR/MINOR/PATCH` | eigener Zähler |
 | Nerves-App | `herz_schwarm_nerves/mix.exs` | `@version` | eigener Zähler |
-| Flash-Tooling | `scripts/flashlib/__init__.py` | `__version__` | eigener Zähler, eigene Git-Tags `v0.1.x` |
+| Flash-Tooling | `scripts/flashlib/__init__.py` | `__version__` | eigener Zähler (aktuell 0.2.0) |
 
 Jedes Modul wird unabhängig gebaut/geflasht/deployed und hat einen eigenen
 Release-Rhythmus — eine einzelne globale Versionsnummer für alles ist bewusst
@@ -105,15 +129,17 @@ build_batch_gui/                    # TUI-Build-Cache (gitignored)
 ## Effekt-Steuerung: NICHT im TUI
 
 - TUI-Flasher: nur Compile / Upload / MAC-Read / Log
-- Effekte (Modes 1-8 + 10 Wellen-Stopp: Virus, Regenbogen, Primzahl, Welle, Beat, Zone, Ambient, Strobe):
+- Effekte (Modi 1–8: Virus, Regenbogen, Primzahl, Welle, Beat, Zone, Ambient, Strobe; 9 Badge finden; 10 Wellen-Stopp; 12 Alle stoppen; 11 ist die Tap-Meldung der Badges; 13 löst das Funk-Update aus, nur App + Bridge):
   - **Web-UI** der Basisstation: `http://<basestation-ip>/` (Port 80)
   - **MQTT**: konfiguriert in NVS der Basisstation, Subscribe auf `herzschwarm/base/cmd/virus`
+  - **Nerves-App** (Phoenix, Port 4000) über die USB-Bridge: Dashboard, `/diagnose`, `/bridge-update`, `/badge-update`
 - TUI hat **keinen ESP-NOW-Adapter** — bewusst keine Effekt-Steuerung
 
 ## Hardware-Setup (Waveshare ESP32-S3-Matrix)
 
 - **Pinout**: interne LED-Matrix = GPIO 14, BOOT-Taste = GPIO 0
-- **LED-Reihenfolge**: GRB (FastLED konfiguriert)
+- **LED-Reihenfolge**: RGB (`FastLED.addLeds<WS2812B, LED_PIN, RGB>`, am Gerät verifiziert)
+- **Bewegungssensor**: QMI8658, I²C SDA GPIO 11 / SCL GPIO 12, Adresse 0x6B (ab Badge 1.8.0, `ENABLE_IMU`)
 - **Backside**: offene Kontakte → **Kapton-Tape Pflicht** vor Inbetriebnahme
 - **FQBN**: `esp32:esp32:esp32s3:CDCOnBoot=cdc` (für USB-Serial-Debug)
 - **arduino-cli-Pfad** (macOS): `/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli`
@@ -137,10 +163,12 @@ ESP32 als USB-Serial-JSON-Bridge.
 - **Bridge-Firmware**: `herz_schwarm_nerves/firmware/esp32_bridge/esp32_bridge.ino` (115200 Baud, JSON-newline)
 - **GenServer-Architektur**: `Bridge` (UART) → `EffectEngine` (State) → `PeerTracker` (Status) → `DashboardLive` (UI)
 - **PubSub-Topics**: `bridge:events`, `effect:state`, `peers:count`
-- **Effekt-Steuerung** (Modes 1-8 + Wellen-Stopp 10) identisch zur ESP32-S3-Basisstation — beide nutzen Kanal 13, MAGIC_ID 0x421337CC
+- **Effekt-Steuerung** (Modi 1–8, Wellen-Stopp 10, Alle stoppen 12) identisch zur ESP32-S3-Basisstation — beide nutzen Kanal 13, MAGIC_ID 0x421337CC
 - **Auto-Detect UART** auf Mac: `Path.wildcard` auf cu.usbserial-*, cu.SLAB_USBtoUART, cu.usbmodem* (XIAO C6)
 - **Reconnect-Backoff** exponential (2s→4s→…→30s) — verhindert Log-Spam bei fehlender Hardware
-- **Nerves-Production-Build** (Raspberry Pi 4) ist optional — der Mac als Dev-Host reicht
+- **Betrieb**: als normale Phoenix-App auf Raspberry Pi OS (systemd-Dienst `herz-schwarm`, Port 4000), kein Nerves-Build — siehe `MAC_SETUP.md`
+- **Funk-Update der Badges**: Modul `HerzSchwarm.BadgeOta`, Seite `/badge-update`, `GET /firmware/badge.bin`, Bridge-Kommando `badge_ota` (ab App 0.3.0 / Bridge 0.5.0)
+- **Effekt-IDs**: App vergibt 100001…2³²−1; 1…99999 gehören dem Morse-Virus der Badges
 - **Gefixt (v1.2.0.5-v1.2.0.7)**: `/dev/ttyUSB0`-Hardcode-Fallback in `bridge.ex` — jetzt `Path.wildcard`-Auto-Detect + fail-loud statt silent fallback
 - **Gefixt**: `plug_cowboy` aus `mix.exs` entfernt (war totes Dependency, Bandit ist der aktive Adapter — `config/config.exs` `adapter: Bandit.PhoenixAdapter`)
 
@@ -156,7 +184,7 @@ ESP32 als USB-Serial-JSON-Bridge.
 
 ## Test-Strategie
 
-- **25/25 Unit-Tests** in `scripts/flashlib/tests/` (pytest)
+- **41/41 Unit-Tests** in `scripts/flashlib/tests/` (pytest)
 - **Ad-hoc-Verifikation** per Skript unter `/tmp/hermes-verify-*.sh` (Cleanup nach Lauf)
 - **Hardware-Tests**: nur mit echtem ESP32-S3 möglich
   - Flash-Vergleich: 944 KB App + 19 KB Bootloader + 8 KB Partitions = 971 KB
@@ -165,7 +193,7 @@ ESP32 als USB-Serial-JSON-Bridge.
 
 ## Build-Artefakte und gitignore
 
-`build_debug/`, `build_batch/`, `build_basestation/`, `build_bridge/`, `build_batch_gui/`
+`build_debug/`, `build_batch/`, `build_basestation/`, `build_bridge/`, `build_batch_gui/`, `build_ota/`
 sind Build-Caches → **alle in `.gitignore`**. `firmware_update_log.{csv,md}` wird
 **getrackt** (Audit-Trail), `.bak`-Dateien sind ignored.
 
@@ -216,8 +244,8 @@ tail -5 firmware_update_log.csv
 ## Wichtige Constraints
 
 - **macOS first** (GallifreyM1, arm64), Linux secondary (x86_64)
-- **Windows**: v0.2.0 (COM-Ports, VT-Mode aktivieren)
-- **Effekt-Steuerung läuft NUR über Basisstation** (Web-UI / MQTT), nie im TUI
+- **Windows**: TUI ab flashlib v0.2.0 (COM-Ports über pyserial, VT-Mode); Bash-Skripte nur macOS/Linux
+- **Effekt-Steuerung läuft über Basisstation** (Web-UI / MQTT) **oder Nerves-App**, nie im TUI
 - **Fünf unabhängige Versions-Namensräume** (kein einzelnes Single-source-of-truth mehr): Badge (`FW_VERSION_*`, treibt `vA.B.C.D`-Tags), Basisstation (`BASESTATION_FW_*`), Bridge (`BRIDGE_FW_*`), Nerves (`mix.exs` `@version`), flashlib (`__version__`) — siehe Tabelle in README "Versionen aller Module"
 - **Logs append-only**: nie `firmware_update_log.csv` überschreiben
 
@@ -225,5 +253,6 @@ tail -5 firmware_update_log.csv
 
 - Frag nach, bevor `A` (MAJOR) erhöht wird
 - Frag nach, bevor `B` (MINOR) ohne Diskussion erhöht wird
-- Bei Effekt-Steuerung: verweisen auf Basisstation (Web/MQTT), nicht TUI
-- Bei Breaking Change am SyncPacket: 13-Byte-Legacy-Support erhalten
+- Bei Effekt-Steuerung: verweisen auf Basisstation (Web/MQTT) oder Nerves-App, nicht TUI
+- Stationen senden Hauptversion 0 — daran erkennen Badges sie; Badge-FW nie mit Major 0 bauen
+- Bei Breaking Change am SyncPacket: 13-Byte-Legacy-Support erhalten; Paketlängen 17/21/23/54 siehe README „ESP-NOW Paket"

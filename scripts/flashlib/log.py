@@ -36,22 +36,24 @@ class Log:
         new_file = not self.csv_path.exists()
         if new_file:
             self.csv_path.parent.mkdir(parents=True, exist_ok=True)
-            self.csv_path.write_text(_CSV_HEADER + "\n")
-        with self.csv_path.open("a") as f:
+            with self.csv_path.open("w", encoding="utf-8", newline="\n") as f:
+                f.write(_CSV_HEADER + "\n")
+        with self.csv_path.open("a", encoding="utf-8", newline="\n") as f:
             f.write(f"{ts};{fw};{port};{result};{mac}\n")
 
     def _append_md(self, ts: str, fw: str, port: str, result: str, mac: str) -> None:
         new_file = not self.md_path.exists()
         if new_file:
             self.md_path.parent.mkdir(parents=True, exist_ok=True)
-            self.md_path.write_text(_MD_HEADER)
+            with self.md_path.open("w", encoding="utf-8", newline="\n") as f:
+                f.write(_MD_HEADER)
         mac_disp = mac if mac else "—"
-        with self.md_path.open("a") as f:
+        with self.md_path.open("a", encoding="utf-8", newline="\n") as f:
             f.write(f"| {ts} | {fw} | `{port}` | {result} | {mac_disp} |\n")
 
     def tail_md(self, lines: int = 20) -> str:
         """Return last N lines of the MD log (or whole file if shorter)."""
         if not self.md_path.exists():
             return ""
-        text = self.md_path.read_text().splitlines()
+        text = self.md_path.read_text(encoding="utf-8", errors="replace").splitlines()
         return "\n".join(text[-lines:])
